@@ -1,0 +1,58 @@
+"""스펙트럼C(감수율피크 vs 파편화피크)를 depth=1에서 3개 시드로 재현 --
+기존엔 각 depth당 1시드씩만 확인됨."""
+import numpy as np
+import networkx as nx
+from swing_eom import build_system, rk4_step
+
+nodes, idx, n_hubs, Omega_base, edges, H, cluster_idx = build_system(depth=1, buffer_radius=8)
+gamma, dt = 0.3, 0.01
+
+def susceptibility(K, seed, transient=12000, n_snap=150, sample_every=20):
+    rng = np.random.default_rng(seed)
+    state = np.concatenate([rng.uniform(0,2*np.pi,n_hubs), np.zeros(n_hubs)])
+    for _ in range(transient):
+        state = rk4_step(state, dt, n_hubs, Omega_base, edges, gamma, K)
+    rs = []
+    for _ in range(n_snap):
+        for _ in range(sample_every):
+            state = rk4_step(state, dt, n_hubs, Omega_base, edges, gamma, K)
+        rs.append(np.abs(np.mean(np.exp(1j*state[:n_hubs]))))
+    rs=np.array(rs)
+    return n_hubs*np.var(rs)
+
+def cluster_fragmentation(K, seed, n_transient=15000, window=3000):
+    rng = np.random.default_rng(seed)
+    state = np.concatenate([rng.uniform(0,2*np.pi,n_hubs), np.zeros(n_hubs)])
+    for _ in range(n_transient):
+        state = rk4_step(state, dt, n_hubs, Omega_base, edges, gamma, K)
+    dtheta_hist = np.zeros((window, len(edges)))
+    theta_i_unwrap = state[edges[:,0]].copy(); theta_j_unwrap = state[edges[:,1]].copy()
+    prev_theta = state[:n_hubs].copy()
+    for t in range(window):
+        state = rk4_step(state, dt, n_hubs, Omega_base, edges, gamma, K)
+        theta = state[:n_hubs]
+        dstep = theta-prev_theta; dstep=(dstep+np.pi)%(2*np.pi)-np.pi
+        theta_i_unwrap += dstep[edges[:,0]]; theta_j_unwrap += dstep[edges[:,1]]
+        dtheta_hist[t] = theta_i_unwrap-theta_j_unwrap
+        prev_theta = theta
+    span = dtheta_hist.max(axis=0)-dtheta_hist.min(axis=0)
+    locked = span < np.pi
+    G2 = nx.Graph(); G2.add_nodes_from(range(n_hubs))
+    for e_idx,is_l in enumerate(locked):
+        if is_l: G2.add_edge(edges[e_idx,0], edges[e_idx,1])
+    comps = [c for c in nx.connected_components(G2) if len(c)>=2]
+    return len(comps)
+
+Ks = [0.06,0.07,0.08,0.09,0.095,0.10,0.105,0.11]
+print(f"depth=1, 3개 시드로 감수율/파편화 피크 위치 재현\n")
+for seed in range(3):
+    print(f"--- seed={seed} ---")
+    chi_vals = []; ncl_vals = []
+    for K in Ks:
+        chi = susceptibility(K, seed)
+        ncl = cluster_fragmentation(K, seed)
+        chi_vals.append(chi); ncl_vals.append(ncl)
+        print(f"  K={K:.3f}: chi={chi:8.3f}  클러스터수={ncl}", flush=True)
+    chi_peak_K = Ks[np.argmax(chi_vals)]
+    ncl_peak_K = Ks[np.argmax(ncl_vals)]
+    print(f"  => 감수율피크 K={chi_peak_K}, 파편화피크 K={ncl_peak_K}, 일치여부={chi_peak_K==ncl_peak_K}\n")

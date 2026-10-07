@@ -1,0 +1,85 @@
+"""
+A2: 속도결합 -- 위치의 속도 |xdot_i|^2 (운동에너지형 스칼라, 완전히 회전불변)로
+Omega를 변조. 처음부터 셔플대조군까지 함께 실행.
+Omega_i(v) = Omega_i^0 * (1 + beta*|v_i|^2/<|v|^2>)
+"""
+import numpy as np
+from scipy import stats
+from swing_eom import build_system
+
+def main():
+    nodes, idx, n_hubs, Omega0, edges, H, cluster_idx = build_system(depth=0, buffer_radius=6)
+    pos0 = np.array([H.nodes[n]['pos'] for n in nodes])
+    r0_edges = np.linalg.norm(pos0[edges[:,0]]-pos0[edges[:,1]], axis=1)
+    k_pos=1.0; gamma_pos=2*np.sqrt(k_pos); m_pos=1.0
+
+    def pos_forces(x):
+        d = x[edges[:,0]]-x[edges[:,1]]
+        r = np.linalg.norm(d,axis=1)
+        r_safe = np.where(r<1e-12,1e-12,r)
+        unit = d/r_safe[:,None]
+        fmag = -k_pos*(r-r0_edges)
+        fvec = fmag[:,None]*unit
+        F = np.zeros_like(x)
+        np.add.at(F,edges[:,0],fvec); np.add.at(F,edges[:,1],-fvec)
+        return F
+
+    K_const=0.28
+
+    def run_one(beta, kick_amp, seed, perm=None, T=40.0, dt=0.02, grace=15.0):
+        rng = np.random.default_rng(seed)
+        x = pos0 + rng.normal(scale=kick_amp, size=pos0.shape)
+        v_pos = np.zeros_like(x)
+        theta = rng.uniform(0,2*np.pi,n_hubs); v_th=np.zeros(n_hubs)
+        n_steps = int(T/dt); rs=[]
+        for step in range(n_steps):
+            # 위치: 감쇠진동으로 자연 이완
+            F = pos_forces(x)
+            acc = (F - gamma_pos*v_pos)/m_pos
+            x = x + dt*v_pos; v_pos = v_pos + dt*acc
+            speed2 = np.sum(v_pos**2, axis=1)
+            speed2_norm = speed2/(speed2.mean()+1e-12)
+            if perm is not None: speed2_norm = speed2_norm[perm]
+            Omega_eff = Omega0*(1+beta*speed2_norm)
+            dthij = theta[edges[:,0]]-theta[edges[:,1]]; s=np.sin(dthij)
+            coup = np.zeros(n_hubs)
+            np.add.at(coup, edges[:,0], -K_const*s); np.add.at(coup, edges[:,1], K_const*s)
+            dv_th = Omega_eff - v_th + coup
+            theta = theta + dt*v_th; v_th = v_th + dt*dv_th
+            t=step*dt
+            if t>grace: rs.append(np.abs(np.mean(np.exp(1j*theta))))
+        return np.mean(rs)
+
+    n_seeds=15; seeds=list(range(n_seeds))
+    print("=== A2: 속도결합 Omega(|v|^2), K0=0.28 ===")
+    for beta in [0.1, 0.3, 0.6]:
+        f0 = np.array([run_one(0.0,0.3,s) for s in seeds])
+        fB = np.array([run_one(beta,0.3,s) for s in seeds])
+        delta = fB-f0
+        t,p = stats.ttest_1samp(delta,0.0)
+        ci = 1.96*delta.std(ddof=1)/np.sqrt(n_seeds)
+        print(f"  beta={beta}: delta={delta.mean():+.5f}±{ci:.5f} p={p:.4f} "
+              f"{'유의' if p<0.05 else ''}")
+
+    print("\n=== 셔플 대조군 (beta=0.3, 가장 강한 조건) ===")
+    beta=0.3
+    def get_delta(perm):
+        f0 = np.array([run_one(0.0,0.3,s,perm) for s in seeds])
+        fB = np.array([run_one(beta,0.3,s,perm) for s in seeds])
+        return (fB-f0).mean()
+    d_real = get_delta(None)
+    print(f"원본 delta={d_real:+.5f}")
+    shufs=[]
+    for ss in range(15):
+        perm = np.random.default_rng(3000+ss).permutation(n_hubs)
+        d = get_delta(perm); shufs.append(d)
+    shufs=np.array(shufs)
+    print(f"셔플 평균={shufs.mean():+.5f} std={shufs.std():.5f}")
+    print(f"원본 위치: {(d_real-shufs.mean())/shufs.std():.2f} sigma")
+
+if __name__ == "__main__":
+    main()
+
+# 표본 확대 재검증(50회)
+if __name__ == "__main__":
+    pass

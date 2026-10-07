@@ -1,0 +1,81 @@
+"""§73 재설계(§90 통찰 반영): 배위'비율'이 아니라 '절대 교차이웃수'를 직접 스윕하는 합성
+네트워크. 스윙방정식은 그래프 위상구조+고유진동수만 있으면 되므로(기하좌표 불필요),
+순수 위상학적 합성 그래프로 구축 가능."""
+import numpy as np, time
+from swing_eom import rk4_step
+
+rng_global = np.random.default_rng(42)
+
+def build_synthetic(n_A, n_B, same_deg_A, same_deg_B, cross_deg, seed=0):
+    """A타입(n_A개, Omega=2pi), B타입(n_B개, Omega=2pi/sqrt(2)) -- 각 노드는 same_deg_*개의
+    같은타입 이웃 + cross_deg개의 교차타입 이웃을 갖도록 무작위 정규그래프 근사 구축."""
+    rng = np.random.default_rng(seed)
+    n = n_A+n_B
+    hub_type = np.array([6]*n_A + [12]*n_B)
+    Omega = np.array([2*np.pi if t==6 else 2*np.pi/np.sqrt(2) for t in hub_type])
+    edges_set = set()
+    def add_edge(i,j):
+        if i==j: return
+        key = (min(i,j),max(i,j)); edges_set.add(key)
+    # 같은타입 A끼리 무작위 규칙그래프(근사): 각 A노드가 same_deg_A개의 다른 A와 연결
+    A_idx = np.arange(n_A); B_idx = np.arange(n_A, n_A+n_B)
+    for _ in range(3):  # 여러 라운드로 근사적으로 목표 degree에 수렴
+        for i in A_idx:
+            deg_i = sum(1 for (a,b) in edges_set if a==i or b==i)
+            need = same_deg_A - sum(1 for (a,b) in edges_set if (a==i or b==i) and ((b if a==i else a) in A_idx))
+    # 간단화: 각 타입 내부는 랜덤 규칙그래프로, 교차는 랜덤이분그래프로 별도 생성(정확한 degree 보장 어려우므로 근사)
+    def random_regular_like(idx_list, deg, rng):
+        idx_list = list(idx_list); es=set()
+        stubs = []
+        for i in idx_list: stubs += [i]*deg
+        rng.shuffle(stubs)
+        for k in range(0, len(stubs)-1, 2):
+            a,b = stubs[k], stubs[k+1]
+            if a!=b: es.add((min(a,b),max(a,b)))
+        return es
+    edges_set |= random_regular_like(A_idx, same_deg_A, rng)
+    edges_set |= random_regular_like(B_idx, same_deg_B, rng)
+    # 교차: A 각 노드가 cross_deg개의 B와 연결(랜덤 이분)
+    cross_stubs_A = []
+    for i in A_idx: cross_stubs_A += [i]*cross_deg
+    # B쪽 총 교차자리수를 A쪽과 맞추기 위해 B의 교차degree = n_A*cross_deg/n_B (반올림)
+    cross_deg_B = max(1, round(n_A*cross_deg/n_B))
+    cross_stubs_B = []
+    for j in B_idx: cross_stubs_B += [j]*cross_deg_B
+    rng.shuffle(cross_stubs_A); rng.shuffle(cross_stubs_B)
+    m = min(len(cross_stubs_A), len(cross_stubs_B))
+    for k in range(m):
+        a,b = cross_stubs_A[k], cross_stubs_B[k]
+        edges_set.add((min(a,b),max(a,b)))
+    edges = np.array(list(edges_set))
+    return n, hub_type, Omega, edges
+
+def measure_coupling_var(n, Omega, edges, K, gamma=1.0, dt=0.01, n_steps=1500, transient=1000, seed=0):
+    rng = np.random.default_rng(seed)
+    state = np.concatenate([rng.uniform(0,2*np.pi,n), np.zeros(n)])
+    for _ in range(transient):
+        state = rk4_step(state, dt, n, Omega, edges, gamma, K)
+    coupling_samples = np.zeros((n_steps, n))
+    for t in range(n_steps):
+        theta = state[:n]
+        dth = theta[edges[:,0]]-theta[edges[:,1]]; s=np.sin(dth)
+        np.add.at(coupling_samples[t], edges[:,0], -K*s)
+        np.add.at(coupling_samples[t], edges[:,1],  K*s)
+        state = rk4_step(state, dt, n, Omega, edges, gamma, K)
+    return coupling_samples.var(axis=0)
+
+n_A, n_B = 60, 60
+same_deg_A, same_deg_B = 6, 6   # 동종 결합수는 고정
+K = 0.1
+print("=== 절대 교차이웃수(cross_deg)를 스윕하며 A타입 결합항분산 변화 측정 ===")
+print(f"{'cross_deg':>10} {'A평균분산':>12} {'A분산/cross_deg':>16}")
+t0=time.time()
+for cross_deg in [1,2,4,6,8,10]:
+    n, hub_type, Omega, edges = build_synthetic(n_A,n_B,same_deg_A,same_deg_B,cross_deg,seed=1)
+    varlist=[]
+    for seed in range(3):
+        v = measure_coupling_var(n, Omega, edges, K, seed=seed)
+        varlist.append(v[hub_type==6].mean())
+    meanvar = np.mean(varlist)
+    print(f"{cross_deg:10d} {meanvar:12.5f} {meanvar/cross_deg:16.5f}")
+print(f"소요 {time.time()-t0:.1f}s")

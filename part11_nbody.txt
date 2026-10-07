@@ -1,0 +1,64 @@
+"""[Part 11/20] 순환우주론 N체 완전동역학 대규모화. 기존 N=8-20에서
+확인된 "포획-재점화" 순환(§8.9)을 N=50~200으로 확장한다.
+핵심 물리: 중력형 인력(F~r^-1.964, 이미 확립된 지수) + 하드코어 반발
+(단거리 발산 방지) + 감쇠 없는 순수 동역학. 초기에 흩어진 입자들이
+중력붕괴 후 카오스적으로 재배열되며 포획(다시 흩어지지 않음)되는지,
+포획되면 리아푸노프 지수가 양수인지(§8.9와 같은 방법) 확인한다."""
+import numpy as np
+
+GRAV_EXP = 1.964   # 기존 확립값
+K_GRAV = 5.84       # 기존 확립값(Q_source=17.93 기반 재보정)
+R_CORE = 0.5         # 하드코어 반발 시작 반경(모델 단위)
+A_REP = 50.0
+P_REP = 6.0
+
+def forces(pos):
+    N = pos.shape[0]
+    F = np.zeros_like(pos)
+    for i in range(N):
+        d = pos[i] - pos  # (N,3)
+        r = np.linalg.norm(d, axis=1)
+        r[i] = 1.0  # 자기자신 회피
+        rhat = d / r[:, None]
+        f_grav = -K_GRAV / r**GRAV_EXP  # 인력(음수 크기, i쪽에서 j쪽으로)
+        f_rep = np.where(r < R_CORE*4, A_REP * np.exp(-P_REP*(r/R_CORE - 1)), 0.0)
+        f_total = f_grav + f_rep
+        f_total[i] = 0.0
+        F[i] = np.sum(f_total[:, None] * rhat, axis=0)
+    return F
+
+def rk4_step(pos, vel, dt):
+    def deriv(p, v):
+        return v, forces(p)
+    k1p, k1v = deriv(pos, vel)
+    k2p, k2v = deriv(pos + 0.5*dt*k1p, vel + 0.5*dt*k1v)
+    k3p, k3v = deriv(pos + 0.5*dt*k2p, vel + 0.5*dt*k2v)
+    k4p, k4v = deriv(pos + dt*k3p, vel + dt*k3v)
+    pos_new = pos + (dt/6)*(k1p+2*k2p+2*k3p+k4p)
+    vel_new = vel + (dt/6)*(k1v+2*k2v+2*k3v+k4v)
+    return pos_new, vel_new
+
+def run_capture_test(N, r0=20.0, T=15.0, dt=0.02, seed=0):
+    rng = np.random.default_rng(seed)
+    # 반지름 r0 근방에 무작위로 흩어놓기(기존 방법과 동일)
+    pos = rng.normal(0, r0*0.15, (N,3)) + rng.uniform(-1,1,(N,3))*r0*0.3
+    # 중심으로부터 대략 r0 거리가 되도록 스케일
+    dist = np.linalg.norm(pos, axis=1, keepdims=True)
+    pos = pos / dist * (r0 + rng.normal(0, r0*0.1, (N,1)))
+    vel = np.zeros((N,3))
+    n_steps = int(T/dt)
+    spread_history = []
+    for step in range(n_steps):
+        pos, vel = rk4_step(pos, vel, dt)
+        if step % 20 == 0:
+            spread = np.sqrt(np.mean(np.sum((pos-pos.mean(axis=0))**2, axis=1)))
+            spread_history.append(spread)
+    return pos, vel, spread_history
+
+if __name__ == '__main__':
+    import time
+    for N in [8, 20, 50]:
+        t0 = time.time()
+        pos, vel, spread = run_capture_test(N, r0=20.0, T=12.0, dt=0.02, seed=0)
+        print(f"N={N}: spread_initial={spread[0]:.2f} spread_final={spread[-1]:.2f} "
+              f"min_spread={min(spread):.2f} time={time.time()-t0:.1f}s")

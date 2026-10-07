@@ -1,0 +1,155 @@
+"""로드맵 1-2: Track Q--Track A/B 교차실험 (본실행).
+supercell_builder(m=2, Nsuper=96)의 실제 96허브 그래프 위에서:
+  - 위치+위상 결합 동역학(F_total=F_FS+F_couple, 원칙24)을 Track A(단조 K(r))/
+    Track B(비단조 K(r), K0=9.724)로 각각 진행시켜 그 위상궤적 theta_i(t)를
+    "환경"으로 삼고,
+  - 같은 96허브 그래프 엣지로 만든 단순 강한결합 해밀토니안 H0_ij=-1(Track A-4
+    각주와 동일 선택)에 H(t)=H0+diag(lambda*cos(theta_i(t)))로 시간의존 섭동을 주어
+  - 국소화된 초기파동함수의 앙상블(서로 다른 환경실현=시드) 순수도 Tr(rho_ens^2)
+    감�쇠를 Track A/B 사이에서 직접 비교한다.
+버그체크리스트: (0)널대조군 lambda=0 두 트랙 동일해야, (1)K0=0 fs만 남아 동일해야
+(q1_trackAB_cross.py에서 이미 확인), (4)독립시드, (5)재현성.
+"""
+import numpy as np
+from supercell_builder import build_supercell
+
+m = 2
+ns = build_supercell(m)
+x0 = ns['x0']; Nsuper = ns['Nsuper']
+edges_i, edges_j, edges_n = ns['edges_i'], ns['edges_j'], ns['edges_n']
+r0_edges = ns['r0_edges']; box0 = ns['box0']
+atoms_type = ns['atoms_type']
+Omega = np.array([2*np.pi*(1.0 if t == 6 else 1.0/np.sqrt(2)) for t in atoms_type])
+q_hop = 4.0
+pos0 = x0.reshape(Nsuper, 3)
+
+strain_star = 0.15
+def K_nonmono(strain, K0):
+    x = (1.0+strain)/(1.0+strain_star); x = np.maximum(x, 1e-6)
+    return K0 * x * np.exp(1-x)
+def dK_nonmono(strain, K0):
+    x = (1.0+strain)/(1.0+strain_star); x = np.maximum(x, 1e-6)
+    return K0 * np.exp(1-x)*(1-x) / (1.0+strain_star)
+def K_mono(strain, K0):
+    return K0 * np.exp(-2*q_hop*strain)
+def dK_mono(strain, K0):
+    return -2*q_hop*K_mono(strain, K0)
+
+def strain_and_dir(pos):
+    shift = edges_n @ box0
+    d = (pos[edges_i]-pos[edges_j]) - shift
+    r = np.linalg.norm(d, axis=1)
+    return r/r0_edges - 1.0, d/r[:, None], r
+
+def classical_rhs(y, K0, K_func, dK_func, gamma_pos=3.0, gamma_th=1.0):
+    pos = y[:3*Nsuper].reshape(Nsuper, 3)
+    v_pos = y[3*Nsuper:6*Nsuper].reshape(Nsuper, 3)
+    theta = y[6*Nsuper:7*Nsuper]
+    v_th = y[7*Nsuper:8*Nsuper]
+    strain, unit, r = strain_and_dir(pos)
+    K = K_func(strain, K0)
+    dth = theta[edges_i]-theta[edges_j]
+    s = np.sin(dth)
+    coup_th = np.zeros(Nsuper)
+    np.add.at(coup_th, edges_i, -K*s); np.add.at(coup_th, edges_j, K*s)
+    dv_th = Omega - gamma_th*v_th + coup_th
+    E, G = ns['energy_grad'](pos.ravel())
+    F_fs = -G.reshape(Nsuper, 3)
+    cos_dth = np.cos(dth)
+    dKds = dK_func(strain, K0)
+    Fmag = dKds/r0_edges * cos_dth
+    F_couple = np.zeros((Nsuper, 3))
+    fvec = Fmag[:, None]*unit
+    np.add.at(F_couple, edges_i, fvec); np.add.at(F_couple, edges_j, -fvec)
+    a_pos = (F_fs + F_couple - gamma_pos*v_pos)
+    return np.concatenate([v_pos.ravel(), a_pos.ravel(), v_th, dv_th])
+
+def rk4_classical(y, dt, K0, K_func, dK_func):
+    k1 = classical_rhs(y, K0, K_func, dK_func)
+    k2 = classical_rhs(y+0.5*dt*k1, K0, K_func, dK_func)
+    k3 = classical_rhs(y+0.5*dt*k2, K0, K_func, dK_func)
+    k4 = classical_rhs(y+dt*k3, K0, K_func, dK_func)
+    return y + (dt/6.0)*(k1+2*k2+2*k3+k4)
+
+# ---- 강한결합 해밀토니안 (Track A-4와 동일: 단순모형 t=1) ----
+H0 = np.zeros((Nsuper, Nsuper))
+for a, b in zip(edges_i, edges_j):
+    H0[a, b] = -1.0
+    H0[b, a] = -1.0
+
+def rk4_quantum(psi, dt, Hmat):
+    def f(p): return -1j*(Hmat @ p)
+    k1 = f(psi)
+    k2 = f(psi+0.5*dt*k1)
+    k3 = f(psi+0.5*dt*k2)
+    k4 = f(psi+dt*k3)
+    return psi + (dt/6.0)*(k1+2*k2+2*k3+k4)
+
+i0 = int(np.where(atoms_type == 12)[0][0])  # 국소화 사이트 (N12 허브 하나)
+
+def run_one(track_label, K_func, dK_func, K0, lam, seed, T=15.0, dt=0.02, theta_noise=0.05):
+    rng = np.random.default_rng(seed)
+    theta0 = rng.normal(0, theta_noise, Nsuper)
+    y = np.concatenate([pos0.ravel(), np.zeros(3*Nsuper), theta0, np.zeros(Nsuper)])
+    psi = np.zeros(Nsuper, dtype=complex); psi[i0] = 1.0
+    n_steps = int(T/dt)
+    return_prob = np.zeros(n_steps+1)
+    return_prob[0] = 1.0
+    psis = np.zeros((n_steps+1, Nsuper), dtype=complex)
+    psis[0] = psi
+    for step in range(n_steps):
+        theta = y[6*Nsuper:7*Nsuper]
+        Hnow = H0 + np.diag(lam*np.cos(theta))
+        psi = rk4_quantum(psi, dt, Hnow)
+        y = rk4_classical(y, dt, K0, K_func, dK_func)
+        return_prob[step+1] = np.abs(psi[i0])**2
+        psis[step+1] = psi
+    return return_prob, psis
+
+K0_ref = 9.724
+lambdas = [0.0, 0.5, 2.0, 5.0]
+n_seeds = 8
+T, dt = 15.0, 0.02
+report_t = [5.0, 10.0, 15.0]
+report_idx = [int(t/dt) for t in report_t]
+
+tracks = {
+    "TrackA(단조,불안정)": (K_mono, dK_mono),
+    "TrackB(비단조,안정,K0=9.724)": (K_nonmono, dK_nonmono),
+}
+
+print(f"=== Q-1 Track A/B 교차실험 (m={m}, Nsuper={Nsuper}, i0={i0}(N{atoms_type[i0]}), "
+      f"seeds={n_seeds}, T={T}, dt={dt}) ===\n")
+
+results = {}
+for tname, (Kf, dKf) in tracks.items():
+    print(f"--- {tname} ---")
+    for lam in lambdas:
+        rp_all = []
+        psi_at_report = {ti: [] for ti in report_idx}
+        for seed in range(n_seeds):
+            rp, psis = run_one(tname, Kf, dKf, K0_ref, lam, seed, T=T, dt=dt)
+            rp_all.append(rp)
+            for ti in report_idx:
+                psi_at_report[ti].append(psis[ti])
+        rp_all = np.array(rp_all)
+        mean_rp_win = rp_all[:, -int(2.5/dt):].mean(axis=1)  # 각 시드의 마지막 2.5시간창 시간평균 복귀확률
+        purities = []
+        for ti in report_idx:
+            plist = psi_at_report[ti]
+            rho_ens = np.zeros((Nsuper, Nsuper), dtype=complex)
+            for p in plist:
+                rho_ens += np.outer(p, p.conj())
+            rho_ens /= len(plist)
+            purity = np.real(np.trace(rho_ens @ rho_ens))
+            purities.append(purity)
+        results[(tname, lam)] = dict(mean_rp=mean_rp_win.mean(), std_rp=mean_rp_win.std(),
+                                      purity=purities)
+        print(f"  lambda={lam:4.1f}: 복귀확률(말단창평균)={mean_rp_win.mean():.4f}±{mean_rp_win.std():.4f} | "
+              f"앙상블순수도 t={report_t}: " + ", ".join(f"{p:.4f}" for p in purities))
+    print()
+
+print("=== 재현성 재확인 (Track B, lambda=2.0, seed=0 재실행 동일한지) ===")
+rp1, _ = run_one("chk", *tracks["TrackB(비단조,안정,K0=9.724)"], K0_ref, 2.0, 0, T=T, dt=dt)
+rp2, _ = run_one("chk", *tracks["TrackB(비단조,안정,K0=9.724)"], K0_ref, 2.0, 0, T=T, dt=dt)
+print("최대차이:", np.abs(rp1-rp2).max(), "(0이어야 정상)")

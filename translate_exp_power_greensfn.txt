@@ -1,0 +1,72 @@
+"""사용자 질문("지수형/거듭제곱형 사이 통역형 수식") + 외주100 검토에 대한 후속:
+베른슈타인 정리(r^-alpha = 적분(t^(alpha-1) e^{-rt} dt)/Gamma(alpha))는 멱함수가
+무한히 많은 지수함수의 연속중첩임을 보여준다. 이 프로젝트의 강한결합 해밀토니안
+레졸벤트(그린함수) G(E,r)=[(E-H0)^-1]_ij는 "모든 홉 경로 길이"를 다 더한 양이므로,
+단일 지수형(직접결합 K(r))과 달리 특정 에너지(특히 2-2에서 발견한 E=0 근접축퇴
+다양체 지점)에서 멱함수형 장거리 감쇠를 자연히 보일 수 있는지 직접 계산으로 확인.
+"""
+import numpy as np
+from network_base import build_growing_shell, build_multicell_graph, classify_hub_types, build_hub_graph
+
+all_pts, vor, cluster_idx = build_growing_shell(buffer_radius=14, depth=2)
+G, face_seen, vertex_coord = build_multicell_graph(all_pts, vor, cluster_idx)
+hub_pos, hub_N, n_mixed = classify_hub_types(G)
+Hg = build_hub_graph(G, hub_pos, hub_N)
+nodes = list(Hg.nodes())
+n = len(nodes)
+idx = {k: i for i, k in enumerate(nodes)}
+pos = {k: hub_pos[k] for k in nodes}
+
+H0 = np.zeros((n, n))
+for a, b in Hg.edges():
+    ia, ib = idx[a], idx[b]
+    H0[ia, ib] = -1.0; H0[ib, ia] = -1.0
+
+# 원점에 가장 가까운 노드를 기준점으로
+ref = min(nodes, key=lambda k: np.linalg.norm(pos[k]))
+ref_idx = idx[ref]
+print(f"기준노드: {ref}, 위치={pos[ref]}, 거리={np.linalg.norm(pos[ref]):.4f}")
+
+dists = np.array([np.linalg.norm(pos[k]-pos[ref]) for k in nodes])
+
+eta = 0.05
+I = np.eye(n)
+
+def greens_row(E):
+    Gmat = np.linalg.inv((E + 1j*eta)*I - H0)
+    return np.abs(Gmat[ref_idx, :])
+
+energies_to_test = {
+    "E=0 (밴드중심, 근접축퇴다양체 위치)": 0.0,
+    "E=1.5 (밴드중심에서 벗어남)": 1.5,
+    "E=3.0 (더 벗어남)": 3.0,
+    "E=6.0 (밴드가장자리 근접)": 6.0,
+}
+
+from scipy.stats import linregress
+
+print(f"\n{'에너지':>35} | {'멱함수적합 R2(log|G| vs log r)':>28} | {'지수함수적합 R2(log|G| vs r)':>26}")
+mask_r = (dists > 0.9) & (dists < 5.0)
+r_fit = dists[mask_r]
+for label, E in energies_to_test.items():
+    Grow = greens_row(E)
+    g_fit = Grow[mask_r]
+    g_fit_safe = np.clip(g_fit, 1e-300, None)
+    logr = np.log(r_fit)
+    logg = np.log(g_fit_safe)
+    # 멱함수: log|G| = a*log(r) + b
+    res_pow = linregress(logr, logg)
+    # 지수함수: log|G| = a*r + b
+    res_exp = linregress(r_fit, logg)
+    print(f"{label:>35} | R2={res_pow.rvalue**2:6.4f}(기울기={res_pow.slope:+.3f})      | "
+          f"R2={res_exp.rvalue**2:6.4f}(기울기={res_exp.slope:+.3f})")
+
+print("\n=== 참고: 각 에너지가 실제 스펙트럼에서 어디에 있는지(상태밀도 확인) ===")
+evals = np.linalg.eigvalsh(H0)
+for label, E in energies_to_test.items():
+    window = np.sum(np.abs(evals-E) < 0.3)
+    print(f"  {label}: |E_n - {E}|<0.3인 고유값 개수 = {window} (밀도 참고용)")
+
+print("\n=== 재현성 재확인 (E=0 재계산 동일한지) ===")
+g1 = greens_row(0.0); g2 = greens_row(0.0)
+print("최대차이:", np.abs(g1-g2).max(), "(0이어야 정상)")

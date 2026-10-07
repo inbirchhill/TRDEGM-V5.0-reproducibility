@@ -1,0 +1,41 @@
+"""3.12: K 자체를 오르내리는 순환으로 만들어(순환가설 §8.9의 국소버전),
+완전동기화 이후 K를 다시 낮추면 국지적 구조(위성클러스터)가 재점화되는지,
+그리고 이 순환을 여러 번 반복해도 같은 패턴이 재현되는지 확인."""
+import numpy as np
+import networkx as nx
+from swing_eom import build_system, rk4_step
+
+nodes, idx, n_hubs, Omega_base, edges, H, cluster_idx = build_system(depth=0, buffer_radius=6)
+N_arr = np.array([H.nodes[n]['N'] for n in nodes])
+gamma, dt = 0.3, 0.01
+
+def snapshot_clusters(state, tol=0.1):
+    theta = state[:n_hubs]
+    dth = theta[edges[:,0]] - theta[edges[:,1]]
+    close = np.abs(np.sin(dth/2)) < tol
+    G2 = nx.Graph(); G2.add_nodes_from(range(n_hubs))
+    for e_idx, is_c in enumerate(close):
+        if is_c: G2.add_edge(edges[e_idx,0], edges[e_idx,1])
+    comps = sorted(nx.connected_components(G2), key=len, reverse=True)
+    return comps
+
+# K를 낮음(파편화영역)<->높음(완전동기화)으로 3회 순환
+K_low, K_high = 0.105, 0.20
+cycle_steps = 15000  # 각 반쪽 사이클 길이
+
+rng = np.random.default_rng(0)
+state = np.concatenate([rng.uniform(0,2*np.pi,n_hubs), np.zeros(n_hubs)])
+
+print(f"K_low={K_low}(파편화), K_high={K_high}(완전동기화), 반주기={cycle_steps}스텝, 3회 순환\n")
+print(f"{'사이클':>6} {'국면':>8} {'누적스텝':>10} {'핵심크기':>8} {'클러스터수(>=2)':>14}")
+
+total = 0
+for cyc in range(3):
+    for phase, K in [('LOW', K_low), ('HIGH', K_high)]:
+        for _ in range(cycle_steps):
+            state = rk4_step(state, dt, n_hubs, Omega_base, edges, gamma, K)
+        total += cycle_steps
+        comps = snapshot_clusters(state)
+        multi = [c for c in comps if len(c)>=2]
+        core = len(comps[0]) if comps else 0
+        print(f"{cyc:6d} {phase:>8} {total:10d} {core:8d} {len(multi):14d}", flush=True)

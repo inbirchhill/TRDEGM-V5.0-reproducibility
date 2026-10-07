@@ -1,0 +1,78 @@
+"""
+A3: 위상진동자의 유효관성(I_i)을 국소구조 강성(rho_i, FS밀도)으로 변조.
+(주의: C4/D1의 '질량=격자왜곡'과는 다른 층위 -- 이건 위상방정식 내부의 관성 계수일 뿐,
+위치공간의 물리적 질량 개념과 섞지 않는다.)
+
+I_i(x) = I0 / (1 + beta*rho_i(x))  (밀도 높을수록 관성 작아져 반응 빨라짐, 임의 선택 -
+반대부호도 시험)
+
+처음부터 셔플대조군 동시 실행.
+"""
+import numpy as np
+from scipy import stats
+from swing_eom import build_system
+
+def main():
+    nodes, idx, n_hubs, Omega0, edges, H, cluster_idx = build_system(depth=0, buffer_radius=6)
+    pos0 = np.array([H.nodes[n]['pos'] for n in nodes])
+    r0_edges = np.linalg.norm(pos0[edges[:,0]]-pos0[edges[:,1]], axis=1)
+    q_param=4.0
+    def phi(s): return np.exp(-2*q_param*s)
+    def rho_of(x):
+        d = x[edges[:,0]]-x[edges[:,1]]
+        r = np.linalg.norm(d,axis=1)
+        strain = r/r0_edges-1.0
+        ph = phi(strain)
+        rho = np.zeros(n_hubs)
+        np.add.at(rho, edges[:,0], ph); np.add.at(rho, edges[:,1], ph)
+        return rho/rho.max()
+
+    K_const=0.28
+
+    def run_one(beta, kick_amp, seed, perm=None, sign=+1, T=40.0, dt=0.02, grace=15.0):
+        rng = np.random.default_rng(seed)
+        x_disp = pos0 + rng.normal(scale=kick_amp, size=pos0.shape)
+        rho = rho_of(x_disp)
+        if perm is not None: rho = rho[perm]
+        I_eff = 1.0/(1.0+sign*beta*rho)  # I0=1
+        theta = rng.uniform(0,2*np.pi,n_hubs); v=np.zeros(n_hubs)
+        n_steps=int(T/dt); rs=[]
+        for step in range(n_steps):
+            dthij = theta[edges[:,0]]-theta[edges[:,1]]; s=np.sin(dthij)
+            coup=np.zeros(n_hubs)
+            np.add.at(coup,edges[:,0],-K_const*s); np.add.at(coup,edges[:,1],K_const*s)
+            dv = (Omega0 - v + coup)/I_eff
+            theta = theta+dt*v; v = v+dt*dv
+            t=step*dt
+            if t>grace: rs.append(np.abs(np.mean(np.exp(1j*theta))))
+        return np.mean(rs)
+
+    n_seeds=15; seeds=list(range(n_seeds))
+    print("=== A3: 관성 I(rho) 변조, K0=0.28 (sign=+1: 밀도높으면 관성작음) ===")
+    for beta in [0.1,0.3,0.6]:
+        f0 = np.array([run_one(0.0,0.3,s) for s in seeds])
+        fB = np.array([run_one(beta,0.3,s,sign=+1) for s in seeds])
+        delta = fB-f0
+        t,p = stats.ttest_1samp(delta,0.0)
+        ci = 1.96*delta.std(ddof=1)/np.sqrt(n_seeds)
+        print(f"  beta={beta}: delta={delta.mean():+.5f}±{ci:.5f} p={p:.4f} {'유의' if p<0.05 else ''}")
+
+    print("\n=== 셔플대조군 (beta=0.3) ===")
+    beta=0.3
+    def get_delta(perm):
+        f0 = np.array([run_one(0.0,0.3,s,perm) for s in seeds])
+        fB = np.array([run_one(beta,0.3,s,perm,sign=+1) for s in seeds])
+        return (fB-f0).mean()
+    d_real = get_delta(None)
+    print(f"원본 delta={d_real:+.5f}")
+    shufs=[]
+    for ss in range(30):
+        perm = np.random.default_rng(5000+ss).permutation(n_hubs)
+        shufs.append(get_delta(perm))
+    shufs=np.array(shufs)
+    print(f"셔플30회 평균={shufs.mean():+.5f} std={shufs.std():.5f}")
+    sigma = (d_real-shufs.mean())/shufs.std() if shufs.std()>0 else float('nan')
+    print(f"원본 위치: {sigma:.2f} sigma, 백분위={np.mean(shufs<d_real)*100:.1f}%ile")
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,71 @@
+"""사용자 제안: '통합=구성요소 모음(다방면 해상도)'을 검정. N6가 여러
+독립측정(안정성, 결맞음)에서 동시에 높은 점수를 보이는 것 자체가
+'통합'이라면, 이게 N6만의 특별한 성질인지 아니면 '적당히 큰 임의
+부분집합이면 다 그런지' 대조군(무작위 부분집합)과 비교해야 진짜
+검정이 된다."""
+import numpy as np
+from swing_eom import build_system, rk4_step
+
+nodes, idx, n_hubs, Omega_base, edges, H, cluster_idx = build_system(depth=0, buffer_radius=6)
+gamma, dt = 0.3, 0.01
+N_arr = np.array([H.nodes[n]['N'] for n in nodes])
+n6_mask = (N_arr==6)
+n6_count = n6_mask.sum()
+print(f"N6 개수={n6_count}, 전체={n_hubs}")
+
+def lyapunov_restricted(K, mask, seed=0, n_transient=15000, n_measure=4000, eps0=1e-8, renorm_every=50):
+    rng = np.random.default_rng(seed)
+    state = np.concatenate([rng.uniform(0,2*np.pi,n_hubs), np.zeros(n_hubs)])
+    for _ in range(n_transient):
+        state = rk4_step(state, dt, n_hubs, Omega_base, edges, gamma, K)
+    full_mask = np.concatenate([mask.astype(float), mask.astype(float)])
+    pert = rng.normal(0,1,2*n_hubs)*full_mask
+    if np.linalg.norm(pert)<1e-12: return float('nan')
+    pert /= np.linalg.norm(pert)
+    state2 = state + eps0*pert
+    log_sum=0.0; n_renorm=0
+    for t in range(n_measure):
+        state = rk4_step(state, dt, n_hubs, Omega_base, edges, gamma, K)
+        state2 = rk4_step(state2, dt, n_hubs, Omega_base, edges, gamma, K)
+        diff = (state2-state)*full_mask
+        d = np.linalg.norm(diff)
+        if (t+1)%renorm_every==0:
+            if d>1e-300:
+                log_sum += np.log(d/eps0); n_renorm+=1
+                state2 = state + (diff/d)*eps0*full_mask
+    return log_sum/(n_renorm*renorm_every*dt) if n_renorm>0 else float('nan')
+
+def order_param(K, mask, seed=0, n_transient=15000, n_measure=2000):
+    rng = np.random.default_rng(seed)
+    state = np.concatenate([rng.uniform(0,2*np.pi,n_hubs), np.zeros(n_hubs)])
+    for _ in range(n_transient):
+        state = rk4_step(state, dt, n_hubs, Omega_base, edges, gamma, K)
+    Rs=[]
+    for t in range(n_measure):
+        state = rk4_step(state, dt, n_hubs, Omega_base, edges, gamma, K)
+        theta = state[:n_hubs][mask]
+        Rs.append(np.abs(np.mean(np.exp(1j*theta))))
+    return np.mean(Rs)
+
+K = 0.115
+print(f"\nK={K}: N6 대 무작위 동일크기 부분집합, 두 지표 비교\n")
+
+lyap_n6 = lyapunov_restricted(K, n6_mask, seed=0)
+R_n6 = order_param(K, n6_mask, seed=0)
+print(f"N6(실제): 리아푸노프={lyap_n6:.4f}, 결맞음R={R_n6:.4f}")
+
+rng_master = np.random.default_rng(42)
+print(f"\n무작위 동일크기({n6_count}) 부분집합 5개:")
+random_results = []
+for trial in range(5):
+    rand_idx = rng_master.choice(n_hubs, size=n6_count, replace=False)
+    rand_mask = np.zeros(n_hubs, dtype=bool); rand_mask[rand_idx]=True
+    lyap_r = lyapunov_restricted(K, rand_mask, seed=0)
+    R_r = order_param(K, rand_mask, seed=0)
+    random_results.append((lyap_r, R_r))
+    print(f"  무작위{trial}: 리아푸노프={lyap_r:.4f}, 결맞음R={R_r:.4f}")
+
+lyaps_r = [r[0] for r in random_results]; Rs_r = [r[1] for r in random_results]
+print(f"\n무작위 평균: 리아푸노프={np.mean(lyaps_r):.4f}(표준편차{np.std(lyaps_r):.4f}), 결맞음R={np.mean(Rs_r):.4f}(표준편차{np.std(Rs_r):.4f})")
+print(f"N6이 무작위평균보다 리아푸노프 더 낮음(더안정)? {lyap_n6 < np.mean(lyaps_r)}")
+print(f"N6이 무작위평균보다 결맞음R 더 높음? {R_n6 > np.mean(Rs_r)}")

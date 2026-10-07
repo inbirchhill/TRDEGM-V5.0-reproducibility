@@ -1,0 +1,121 @@
+"""로드맵 1-2: Track Q--Track A/B 교차실험.
+Q-1(위상환경 결어긋남)을 Track B(K0=9.724, 비단조 K(r), 안정)뿐 아니라
+Track A(단조 K(r), 원리적으로 거의 모든 K0>0에서 선형불안정)로도 재실행하여
+"구조형성 트랙(A)에서는 결어긋남이 더 빠른가?"를 직접 검증.
+
+인프라: supercell_builder.py(m=2, Nsuper=96, FS다체포텐셜 기존확립)를 그대로
+재사용 - 원칙24(새 힘 도입시 기존 힘 병행)를 지키기 위해 위상결합만 단독으로
+켜지 않고 항상 F_total = F_FS + F_couple로 위치동역학을 돌린다.
+
+양자 해밀토니안: H0_ij = -1 (단순 강한결합, t=1, Track A-4 각주와 동일 선택),
+같은 96허브 그래프의 그래프 엣지 그대로 사용. 사이트에너지 V_i(t)=lambda*cos(theta_i(t))
+로 고전 위상궤적(같은 동역학에서 나온)이 시간의존 섭동으로 작용.
+"""
+import numpy as np
+from supercell_builder import build_supercell
+
+# ---------- 공용 설정 ----------
+m = 2
+ns = build_supercell(m)
+x0 = ns['x0']; Nsuper = ns['Nsuper']
+edges_i, edges_j, edges_n = ns['edges_i'], ns['edges_j'], ns['edges_n']
+r0_edges = ns['r0_edges']; box0 = ns['box0']
+atoms_type = ns['atoms_type']
+Omega = np.array([2*np.pi*(1.0 if t == 6 else 1.0/np.sqrt(2)) for t in atoms_type])
+q_hop = 4.0
+pos0 = x0.reshape(Nsuper, 3)
+n_edges = len(edges_i)
+
+strain_star = 0.15
+def K_nonmono(strain, K0):
+    """Track B: 비단조(peak at strain_star), 기존 C18/task22와 동일 형태 -- 안정."""
+    x = (1.0+strain)/(1.0+strain_star)
+    x = np.maximum(x, 1e-6)
+    return K0 * x * np.exp(1-x)
+def dK_nonmono(strain, K0):
+    x = (1.0+strain)/(1.0+strain_star)
+    x = np.maximum(x, 1e-6)
+    return K0 * np.exp(1-x)*(1-x) / (1.0+strain_star)
+
+def K_mono(strain, K0):
+    """Track A: 단조 감소(exp), signflip_A_nonmonotone_K.txt의 K_monotone과 동일 형태 -- 불안정."""
+    return K0 * np.exp(-2*q_hop*strain)
+def dK_mono(strain, K0):
+    return -2*q_hop*K_mono(strain, K0)
+
+def strain_and_dir(pos):
+    shift = edges_n @ box0
+    d = (pos[edges_i]-pos[edges_j]) - shift
+    r = np.linalg.norm(d, axis=1)
+    return r/r0_edges - 1.0, d/r[:, None], r
+
+def rhs(y, K0, K_func, dK_func, gamma_pos=3.0, gamma_th=1.0):
+    pos = y[:3*Nsuper].reshape(Nsuper, 3)
+    v_pos = y[3*Nsuper:6*Nsuper].reshape(Nsuper, 3)
+    theta = y[6*Nsuper:7*Nsuper]
+    v_th = y[7*Nsuper:8*Nsuper]
+
+    strain, unit, r = strain_and_dir(pos)
+    K = K_func(strain, K0)
+    dth = theta[edges_i]-theta[edges_j]
+    s = np.sin(dth)
+    coup_th = np.zeros(Nsuper)
+    np.add.at(coup_th, edges_i, -K*s); np.add.at(coup_th, edges_j, K*s)
+    dv_th = Omega - gamma_th*v_th + coup_th
+
+    E, G = ns['energy_grad'](pos.ravel())
+    F_fs = -G.reshape(Nsuper, 3)
+    cos_dth = np.cos(dth)
+    dKds = dK_func(strain, K0)
+    Fmag = dKds/r0_edges * cos_dth
+    F_couple = np.zeros((Nsuper, 3))
+    fvec = Fmag[:, None]*unit
+    np.add.at(F_couple, edges_i, fvec); np.add.at(F_couple, edges_j, -fvec)
+    a_pos = (F_fs + F_couple - gamma_pos*v_pos)
+
+    return np.concatenate([v_pos.ravel(), a_pos.ravel(), v_th, dv_th])
+
+def rk4_step(y, dt, K0, K_func, dK_func):
+    k1 = rhs(y, K0, K_func, dK_func)
+    k2 = rhs(y+0.5*dt*k1, K0, K_func, dK_func)
+    k3 = rhs(y+0.5*dt*k2, K0, K_func, dK_func)
+    k4 = rhs(y+dt*k3, K0, K_func, dK_func)
+    return y + (dt/6.0)*(k1+2*k2+2*k3+k4)
+
+# ---------- 0. 대조군(널 체크): K0=0이면 두 트랙 모두 FS만 남아 완전히 동일해야 함 ----------
+def make_y0(seed, theta_noise=0.05):
+    rng = np.random.default_rng(seed)
+    theta0 = rng.normal(0, theta_noise, Nsuper)
+    return np.concatenate([pos0.ravel(), np.zeros(3*Nsuper), theta0, np.zeros(Nsuper)])
+
+y0_test = make_y0(seed=0)
+y_A0 = y0_test.copy(); y_B0 = y0_test.copy()
+for _ in range(50):
+    y_A0 = rk4_step(y_A0, 0.01, 0.0, K_mono, dK_mono)
+    y_B0 = rk4_step(y_B0, 0.01, 0.0, K_nonmono, dK_nonmono)
+print("[널대조군] K0=0에서 Track A/B 위치궤적 최대차이:",
+      np.abs(y_A0[:3*Nsuper]-y_B0[:3*Nsuper]).max(), "(0에 가까워야 정상)")
+
+# ---------- 1. 구조안정성 스팟체크 (Track A=불안정 vs Track B=안정, 이 supercell에서 재확인) ----------
+K0_struct = 9.724
+print("\n[구조안정성 체크] K0=9.724, 위상없이 위치RMS편차 추이 (t=0,5,10,20)")
+for label, Kf, dKf in [("Track A(단조)", K_mono, dK_mono), ("Track B(비단조)", K_nonmono, dK_nonmono)]:
+    y = make_y0(seed=1)
+    checkpoints = {0.0}
+    t = 0.0; dt = 0.01
+    report_times = [0.0, 5.0, 10.0, 20.0]
+    ri = 0
+    msgs = []
+    n_steps = int(20.0/dt)
+    for step in range(n_steps+1):
+        if ri < len(report_times) and t >= report_times[ri]-1e-9:
+            pos = y[:3*Nsuper].reshape(Nsuper, 3)
+            rms = np.sqrt(np.mean(np.sum((pos-pos0)**2, axis=1)))
+            msgs.append(f"t={report_times[ri]:.0f}: RMS편차={rms:.4f}")
+            ri += 1
+        if step < n_steps:
+            y = rk4_step(y, dt, K0_struct, Kf, dKf)
+            t += dt
+    print(f"  {label}: " + " | ".join(msgs))
+
+print("\n(위 구조안정성 체크가 예상대로 Track A>>Track B로 갈리는지 확인 후 아래 결어긋남 실험 진행)")

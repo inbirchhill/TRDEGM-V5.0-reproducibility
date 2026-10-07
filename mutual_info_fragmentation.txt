@@ -1,0 +1,48 @@
+"""항목2(통합) 재개: 상호정보량(가우시안 근사)이 파편화피크(K~0.105) 근방에서
+극대화되는지 확인 -- 2차외주가 시사한 "완전동기화되면 Phi가 폭락한다"는
+예측과 대조. depth=1, 3시드."""
+import numpy as np
+from swing_eom import build_system, rk4_step
+
+nodes, idx, n_hubs, Omega_base, edges, H, cluster_idx = build_system(depth=1, buffer_radius=8)
+gamma, dt = 0.3, 0.01
+
+def integration_proxy(K, seed, transient=12000, n_snap=300, sample_every=15):
+    """허브 위상속도의 시계열을 모아 공분산행렬을 구하고, 평균 쌍별
+    상호정보량(가우시안 근사, MI=-0.5*log(1-rho^2))을 전체 통합의 대리
+    지표로 사용. 계산비용 때문에 무작위 허브쌍 500개만 표본."""
+    rng = np.random.default_rng(seed)
+    state = np.concatenate([rng.uniform(0,2*np.pi,n_hubs), np.zeros(n_hubs)])
+    for _ in range(transient):
+        state = rk4_step(state, dt, n_hubs, Omega_base, edges, gamma, K)
+    V = np.zeros((n_snap, n_hubs))
+    for t in range(n_snap):
+        for _ in range(sample_every):
+            state = rk4_step(state, dt, n_hubs, Omega_base, edges, gamma, K)
+        V[t] = state[n_hubs:]
+    # 무작위 허브쌍 500개의 상관계수 -> MI
+    pair_rng = np.random.default_rng(seed+1000)
+    pairs = pair_rng.integers(0, n_hubs, size=(500,2))
+    pairs = pairs[pairs[:,0]!=pairs[:,1]]
+    mis = []
+    Vstd = V.std(axis=0)
+    valid = Vstd > 1e-10
+    for i,j in pairs:
+        if not(valid[i] and valid[j]): continue
+        rho = np.corrcoef(V[:,i], V[:,j])[0,1]
+        rho = np.clip(rho, -0.9999, 0.9999)
+        mi = -0.5*np.log(1-rho**2)
+        mis.append(mi)
+    return np.mean(mis), np.array(mis)
+
+Ks = [0.06,0.07,0.08,0.09,0.095,0.10,0.105,0.11,0.115,0.12]
+print("depth=1, 상호정보량(가우시안근사) vs K, 3시드\n")
+for seed in range(3):
+    print(f"--- seed={seed} ---")
+    mi_vals = []
+    for K in Ks:
+        mi_mean, mis = integration_proxy(K, seed)
+        mi_vals.append(mi_mean)
+        print(f"  K={K:.3f}: 평균MI={mi_mean:.4f}  (표본n={len(mis)}, 최대={mis.max() if len(mis)>0 else float('nan'):.3f})", flush=True)
+    peak_K = Ks[np.argmax(mi_vals)]
+    print(f"  => MI 최댓값 위치: K={peak_K}\n")

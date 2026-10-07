@@ -1,0 +1,32 @@
+"""Tier1: core_fraction 규모불변성을 depth=2(692허브)로 확장 재현.
+depth=0(94)->0.734, depth=1(300)->0.707이었던 K~0.11 근방 값을 depth=2
+에서도 확인."""
+import numpy as np
+import networkx as nx
+from swing_eom import build_system, rk4_step
+
+nodes, idx, n_hubs, Omega_base, edges, H, cluster_idx = build_system(depth=2, buffer_radius=10)
+gamma, dt = 0.3, 0.01
+print(f"depth=2, n_hubs={n_hubs}", flush=True)
+
+def core_frac_and_ncl(state):
+    theta = state[:n_hubs]
+    dth = theta[edges[:,0]] - theta[edges[:,1]]
+    close = np.abs(np.sin(dth/2)) < 0.1
+    G2 = nx.Graph(); G2.add_nodes_from(range(n_hubs))
+    for e_idx, is_c in enumerate(close):
+        if is_c: G2.add_edge(edges[e_idx,0], edges[e_idx,1])
+    comps = sorted(nx.connected_components(G2), key=len, reverse=True)
+    frac = len(comps[0])/n_hubs if comps else 0.0
+    n_multi = len([c for c in comps if len(c)>=2])
+    return frac, n_multi
+
+import time
+t0=time.time()
+for K in [0.100, 0.105, 0.110, 0.115]:
+    rng = np.random.default_rng(0)
+    state = np.concatenate([rng.uniform(0,2*np.pi,n_hubs), np.zeros(n_hubs)])
+    for _ in range(12000):
+        state = rk4_step(state, dt, n_hubs, Omega_base, edges, gamma, K)
+    frac, ncl = core_frac_and_ncl(state)
+    print(f"K={K:.3f}: core_frac={frac:.4f}  클러스터수={ncl}  (누적시간={time.time()-t0:.0f}s)", flush=True)

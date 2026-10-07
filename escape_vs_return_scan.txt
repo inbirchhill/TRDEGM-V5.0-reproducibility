@@ -1,0 +1,64 @@
+"""사용자 제안: '이탈-탈출'(영구히 벗어남) 대 '묶임-복귀'(다시 돌아옴)를
+구분하는 조건의 해상도를 높인다. 여러 K에서: (a) 자연요동의 복귀율/속도,
+(b) 인위적으로 완전동기화시킨 뒤 놓아줬을 때 탈출(유지)하는지 복귀(풀림)
+하는지와 그 속도를 함께 측정."""
+import numpy as np
+import networkx as nx
+from swing_eom import build_system, rk4_step
+
+nodes, idx, n_hubs, Omega_base, edges, H, cluster_idx = build_system(depth=0, buffer_radius=6)
+gamma, dt = 0.3, 0.01
+
+def core_frac(state):
+    theta = state[:n_hubs]
+    dth = theta[edges[:,0]] - theta[edges[:,1]]
+    close = np.abs(np.sin(dth/2)) < 0.1
+    G2 = nx.Graph(); G2.add_nodes_from(range(n_hubs))
+    for e_idx, is_c in enumerate(close):
+        if is_c: G2.add_edge(edges[e_idx,0], edges[e_idx,1])
+    comps = sorted(nx.connected_components(G2), key=len, reverse=True)
+    return len(comps[0])/n_hubs if comps else 0.0
+
+def natural_fluctuation_stats(K, seed=0, n_transient=15000, n_samp=60, samp_gap=500):
+    rng = np.random.default_rng(seed)
+    state = np.concatenate([rng.uniform(0,2*np.pi,n_hubs), np.zeros(n_hubs)])
+    for _ in range(n_transient):
+        state = rk4_step(state, dt, n_hubs, Omega_base, edges, gamma, K)
+    series = []
+    for _ in range(n_samp):
+        for _ in range(samp_gap):
+            state = rk4_step(state, dt, n_hubs, Omega_base, edges, gamma, K)
+        series.append(core_frac(state))
+    series = np.array(series)
+    mean_val, std_val = series.mean(), series.std()
+    x = series - mean_val
+    acf = np.correlate(x, x, mode='full')[len(x)-1:]
+    acf = acf/acf[0] if acf[0]>1e-10 else acf
+    half_life = None
+    for i,v in enumerate(acf):
+        if v < 0.5: half_life = i; break
+    return mean_val, std_val, half_life, state
+
+def escape_test(K, state_synced, n_release=20000, check_every=2000):
+    """완전동기화 상태에서 K를 유지한 채 그대로 두고(release), core_frac이
+    시간에 따라 얼마나/얼마나 빨리 풀리는지(=복귀) 혹은 유지되는지(=탈출유지) 측정."""
+    state = state_synced.copy()
+    trace = [core_frac(state)]
+    for _ in range(n_release // check_every):
+        for _ in range(check_every):
+            state = rk4_step(state, dt, n_hubs, Omega_base, edges, gamma, K)
+        trace.append(core_frac(state))
+    return trace
+
+print(f"{'K':>7} {'자연평균':>8} {'자연표준편차':>10} {'복귀반감기(스텝)':>14} | {'강제동기화후 core_frac 추이(release)'}")
+for K in [0.070, 0.085, 0.095, 0.100, 0.105, 0.108, 0.110, 0.112, 0.115]:
+    mean_v, std_v, hl, state_end = natural_fluctuation_stats(K)
+    hl_steps = hl*500 if hl is not None else None
+    # 강제 동기화: 이 K에서 잠시 매우 높은 K'로 동기화시킨 �w 원래 K로 복귀시킴
+    rng2 = np.random.default_rng(1)
+    state0 = np.concatenate([rng2.uniform(0,2*np.pi,n_hubs), np.zeros(n_hubs)])
+    for _ in range(15000):
+        state0 = rk4_step(state0, dt, n_hubs, Omega_base, edges, gamma, 0.30)  # 강제완전동기화
+    trace = escape_test(K, state0, n_release=16000, check_every=2000)
+    trace_str = "->".join(f"{v:.2f}" for v in trace)
+    print(f"{K:7.3f} {mean_v:8.3f} {std_v:10.3f} {str(hl_steps):>14} | {trace_str}", flush=True)

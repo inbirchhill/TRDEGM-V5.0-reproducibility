@@ -1,0 +1,48 @@
+"""수정판: '원점 근접'이 아니라 '질량중심 기준 뭉침 정도'로 재응집을
+판정(N체계에서는 고정 중심이 없으므로 원래 기준이 부적절했음)."""
+import numpy as np
+
+n_exp = 0.964
+G_eff = 1.0
+softening = 0.05
+
+def accelerations(pos, mass):
+    N = len(pos)
+    acc = np.zeros_like(pos)
+    for i in range(N):
+        diff = pos - pos[i]
+        r = np.linalg.norm(diff, axis=1)
+        r_soft = np.sqrt(r**2 + softening**2)
+        factor = G_eff * mass / r_soft**(n_exp+1)
+        factor[i] = 0
+        acc[i] = np.sum(diff * factor[:,None], axis=0)
+    return acc
+
+def run_nbody(N, r0, speed_scale, seed=0, t_max=80, dt=0.01):
+    rng = np.random.default_rng(seed)
+    theta = rng.uniform(0, np.pi, N); phi = rng.uniform(0, 2*np.pi, N)
+    pos = r0 * np.stack([np.sin(theta)*np.cos(phi), np.sin(theta)*np.sin(phi), np.cos(theta)], axis=1)
+    vdir = rng.normal(0, 1, (N,3)); vdir /= np.linalg.norm(vdir, axis=1, keepdims=True)
+    vel = speed_scale * vdir
+    mass = np.ones(N)
+
+    r_initial_spread = np.std(np.linalg.norm(pos - pos.mean(axis=0), axis=1))
+    n_steps = int(t_max/dt)
+    for step in range(n_steps):
+        acc = accelerations(pos, mass)
+        vel += acc*dt
+        pos += vel*dt
+
+    com = pos.mean(axis=0)
+    r_from_com = np.linalg.norm(pos - com, axis=1)
+    n_bound = np.sum(r_from_com < 2.0)  # 질량중심 기준 반지름2 이내
+    return n_bound/N, r_from_com.std(), r_initial_spread
+
+print("N체 재응집(질량중심 기준 뭉침도로 재판정)\n")
+print(f"{'speed':>8} {'속박비율':>10} {'최종퍼짐(표준편차)':>14}")
+for speed in [0.02, 0.05, 0.1, 0.15, 0.2, 0.3]:
+    fracs, spreads = [], []
+    for seed in range(3):
+        frac, spread, r0spread = run_nbody(N=30, r0=20.0, speed_scale=speed, seed=seed, t_max=80, dt=0.01)
+        fracs.append(frac); spreads.append(spread)
+    print(f"{speed:8.3f} {np.mean(fracs)*100:9.1f}% {np.mean(spreads):14.3f}  (초기퍼짐≈{r0spread:.2f})", flush=True)

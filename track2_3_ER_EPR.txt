@@ -1,0 +1,87 @@
+"""로드맵 2부 2-3(장기/야심): ER=EPR 재검토. 기존 확립된 포아송 중력장의
+점소스 그린함수 G(r)=A*r^(-alpha)(A=0.018846, alpha=0.964, monopole근사
+r>=2에서 유효, §macro)와, 두 지점 사이의 거리 r이 커질수록 위상결합
+(K(r)=K0*exp(-2q(r/r0-1)), 기존 확립된 형태)으로 생성되는 얽힘엔트로피가
+같은 정성적 추세(거리가 멀수록 둘 다 감소)를 보이는지 직접 계산으로 확인.
+완전한 증명이 아니라 정성적 상관관계(있다/없다) 확인이 목표.
+"""
+import numpy as np
+
+A_grav, alpha_grav = 0.018846, 0.964
+def G_gravity(r):
+    return A_grav * r**(-alpha_grav)
+
+q_hop, r0 = 4.0, 1.0
+K0 = 1.0
+def K_of_r(r):
+    return K0*np.exp(-2*q_hop*(r/r0-1))
+
+Omega_A, Omega_B = 1.0, 1.0/np.sqrt(2)  # N6/N12, Q-3와 동일 관례
+
+sx = np.array([[0,1],[1,0]], dtype=complex)
+sy = np.array([[0,-1j],[1j,0]], dtype=complex)
+sz = np.array([[1,0],[0,-1]], dtype=complex)
+I2 = np.eye(2, dtype=complex)
+
+def build_H2(r):
+    K = K_of_r(r)
+    Ha = np.kron(Omega_A/2*sz, I2)
+    Hb = np.kron(I2, Omega_B/2*sz)
+    Hxy = (K/2.0)*(np.kron(sx,sx) + np.kron(sy,sy))
+    return Ha+Hb+Hxy
+
+def rk4_step(psi, dt, H):
+    def f(p): return -1j*(H@p)
+    k1=f(psi); k2=f(psi+0.5*dt*k1); k3=f(psi+0.5*dt*k2); k4=f(psi+dt*k3)
+    return psi+(dt/6.0)*(k1+2*k2+2*k3+k4)
+
+def entanglement_entropy_2qubit(psi):
+    psi2 = psi.reshape(2,2)
+    rho_a = psi2 @ psi2.conj().T
+    evals = np.linalg.eigvalsh(rho_a)
+    evals = evals[evals>1e-12]
+    return -np.sum(evals*np.log2(evals))
+
+# 완전한 곱상태(Q-3와 동일 초기조건) |01> 에서 출발
+psi0 = np.zeros(4, dtype=complex); psi0[1] = 1.0
+
+T, dt = 30.0, 0.02
+n_steps = int(T/dt)
+r_values = np.array([1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0])
+
+print("=== 널대조군: r가 매우 크면(K~0) 얽힘이 거의 생기지 않아야 함 ===")
+H_far = build_H2(50.0)
+psi = psi0.copy()
+for _ in range(n_steps):
+    psi = rk4_step(psi, dt, H_far)
+print(f"r=50(사실상 결합없음): 시간평균 얽힘엔트로피={entanglement_entropy_2qubit(psi):.6f} (0에 가까워야 정상)")
+
+print("\n=== r별 얽힘엔트로피(시간평균) vs 중력퍼텐셜 G(r) ===")
+print(f"{'r':>6} | {'K(r)':>10} | {'S_fullavg(얽힘)':>16} | {'G(r)(중력)':>12}")
+ent_results = []
+for r in r_values:
+    H = build_H2(r)
+    psi = psi0.copy()
+    Ssum = 0.0
+    for step in range(n_steps):
+        psi = rk4_step(psi, dt, H)
+        Ssum += entanglement_entropy_2qubit(psi)
+    Savg = Ssum/n_steps
+    Gval = G_gravity(r) if r >= 2.0 else np.nan  # monopole근사 유효범위(r>=2)만 표시
+    ent_results.append((r, K_of_r(r), Savg, Gval))
+    Gstr = f"{Gval:.6f}" if not np.isnan(Gval) else "  (근사밖)"
+    print(f"{r:6.1f} | {K_of_r(r):10.4f} | {Savg:16.4f} | {Gstr:>12}")
+
+# 정성적 상관관계: 둘 다 r>=2 구간에서 스피어만 상관
+from scipy.stats import spearmanr
+mask = r_values >= 2.0
+rho, pval = spearmanr(r_values[mask], [e[2] for e in ent_results if e[0]>=2.0])
+print(f"\nr>=2 구간에서 r와 얽힘엔트로피 스피어만 상관: rho={rho:.4f}, p={pval:.4e}")
+print("(중력 G(r)은 r가 커지면 항상 단조감소하므로, 얽힘도 단조감소면 '같은 방향' 정성적 상관)")
+
+print("\n=== 재현성 재확인 (r=3.0 재실행 동일한지) ===")
+H = build_H2(3.0)
+psi_a = psi0.copy(); psi_b = psi0.copy()
+for _ in range(n_steps): psi_a = rk4_step(psi_a, dt, H)
+for _ in range(n_steps): psi_b = rk4_step(psi_b, dt, H)
+print("최대차이:", np.abs(psi_a-psi_b).max(), "(0이어야 정상)")

@@ -1,0 +1,61 @@
+"""
+A5: 위상학적(그래프) 결합 -- 거리(계량) 대신 배위수(deg)로 Omega를 변조.
+A2에서 발견한 "배위수-속도 강한 음의 상관"과의 연결점을 직접 테스트:
+Omega_i(deg) = Omega_i^0 * (1 + beta*(deg_i-mean_deg)/std_deg)
+처음부터 셔플 포함.
+"""
+import numpy as np
+from scipy import stats
+from swing_eom import build_system
+
+def main():
+    nodes, idx, n_hubs, Omega0, edges, H, cluster_idx = build_system(depth=0, buffer_radius=6)
+    deg = np.array([H.degree(n) for n in nodes])
+    deg_norm = (deg-deg.mean())/deg.std()
+    K_const=0.28
+
+    def run_one(beta, seed, perm=None, T=40.0, dt=0.02, grace=15.0):
+        rng = np.random.default_rng(seed)
+        dn = deg_norm[perm] if perm is not None else deg_norm
+        Omega_eff = Omega0*(1+beta*dn)
+        theta = rng.uniform(0,2*np.pi,n_hubs); v=np.zeros(n_hubs)
+        n_steps=int(T/dt); rs=[]
+        for step in range(n_steps):
+            dthij = theta[edges[:,0]]-theta[edges[:,1]]; s=np.sin(dthij)
+            coup=np.zeros(n_hubs)
+            np.add.at(coup,edges[:,0],-K_const*s); np.add.at(coup,edges[:,1],K_const*s)
+            dv = Omega_eff - v + coup
+            theta=theta+dt*v; v=v+dt*dv
+            t=step*dt
+            if t>grace: rs.append(np.abs(np.mean(np.exp(1j*theta))))
+        return np.mean(rs)
+
+    n_seeds=15; seeds=list(range(n_seeds))
+    print("=== A5: Omega(배위수) 변조, K0=0.28 ===")
+    for beta in [0.02,0.05,0.1]:
+        f0=np.array([run_one(0.0,s) for s in seeds])
+        fB=np.array([run_one(beta,s) for s in seeds])
+        delta=fB-f0
+        t,p=stats.ttest_1samp(delta,0.0)
+        ci=1.96*delta.std(ddof=1)/np.sqrt(n_seeds)
+        print(f"  beta={beta}: delta={delta.mean():+.5f}±{ci:.5f} p={p:.4f} {'유의' if p<0.05 else ''}")
+
+    print("\n=== 셔플대조군 (beta=0.1) ===")
+    beta=0.1
+    def get_delta(perm):
+        f0=np.array([run_one(0.0,s,perm) for s in seeds])
+        fB=np.array([run_one(beta,s,perm) for s in seeds])
+        return (fB-f0).mean()
+    d_real=get_delta(None)
+    print(f"원본 delta={d_real:+.5f}")
+    shufs=[]
+    for ss in range(30):
+        perm=np.random.default_rng(6000+ss).permutation(n_hubs)
+        shufs.append(get_delta(perm))
+    shufs=np.array(shufs)
+    print(f"셔플30회 평균={shufs.mean():+.5f} std={shufs.std():.5f}")
+    sigma=(d_real-shufs.mean())/shufs.std() if shufs.std()>0 else float('nan')
+    print(f"원본 위치: {sigma:.2f}sigma, 백분위={np.mean(shufs<d_real)*100:.1f}%ile")
+
+if __name__ == "__main__":
+    main()

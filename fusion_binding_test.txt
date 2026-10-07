@@ -1,0 +1,68 @@
+"""§거시세계 '핵융합에 대한 유비' 심화(항목3): 실제 핵융합의 가장 유명한 구조적 특징인
+'핵자당 결합에너지 곡선'(작은 핵일수록 융합시 에너지방출↑, 철 부근에서 정점, 그 이후 감소)이
+이 모델에도 구조적으로 존재하는지 검증. 스윙방정식의 결합항 자체가 위치에너지이므로
+(K(1-cos(dtheta))), 동기화된 정상상태에서 이 결합에너지를 노드당/신규셀당으로 계산해
+네트워크 규모(depth)에 따라 어떻게 변하는지 직접 측정."""
+import numpy as np, networkx as nx, time
+from swing_eom import build_system, rk4_step
+
+def settle(depth, buffer_radius, K=0.5, dt=0.01, settle_steps=3000, seed=0):
+    nodes, idx, n_hubs, Omega, edges, H, cluster_idx = build_system(depth=depth, buffer_radius=buffer_radius)
+    rng = np.random.default_rng(seed)
+    state = np.concatenate([rng.uniform(0,2*np.pi,n_hubs), Omega.copy()])
+    for _ in range(settle_steps):
+        state = rk4_step(state, dt, n_hubs, Omega, edges, gamma=1.0, K=K)
+    theta = state[:n_hubs]
+    v = state[n_hubs:]
+    return nodes, idx, n_hubs, Omega, edges, H, theta, v
+
+def coupling_energy(theta, edges, K):
+    dth = theta[edges[:,0]] - theta[edges[:,1]]
+    e_edge = K*(1-np.cos(dth))
+    return e_edge
+
+results = {}
+for depth, buf in [(0,6),(1,8),(2,10)]:
+    t0=time.time()
+    nodes, idx, n_hubs, Omega, edges, H, theta, v = settle(depth, buf)
+    vstd = v.std()
+    e_edge = coupling_energy(theta, edges, K=0.5)
+    E_total = e_edge.sum()
+    E_per_hub = E_total/n_hubs
+    E_per_edge = e_edge.mean()
+    results[depth] = dict(n_hubs=n_hubs, n_edges=len(edges), E_total=E_total,
+                           E_per_hub=E_per_hub, E_per_edge=E_per_edge, vstd=vstd,
+                           nodes=nodes, idx=idx, theta=theta, H=H)
+    print(f"depth={depth}: N={n_hubs}, E={len(edges)}, 동기화확인(vstd)={vstd:.2e}, "
+          f"E_total={E_total:.3f}, E_per_hub={E_per_hub:.5f}, E_per_edge={E_per_edge:.5f}  ({time.time()-t0:.1f}s)")
+
+print("\n=== 노드당 결합에너지(E_per_hub) 규모별 추세 (핵자당 결합에너지 곡선과의 구조적 대조) ===")
+depths = sorted(results.keys())
+vals = [results[d]['E_per_hub'] for d in depths]
+for d,v_ in zip(depths, vals):
+    print(f"  depth={d} (N={results[d]['n_hubs']}): E_per_hub={v_:.5f}")
+
+diffs = np.diff(vals)
+print(f"\n증가폭: {diffs}")
+print("단조증가" if all(d>0 for d in diffs) else ("단조감소" if all(d<0 for d in diffs) else "비단조(봉우리 있음 가능)"))
+
+# 신규 셀(껍질)만의 한계결합에너지: depth d의 신규 허브(=depth d 망에는 있고 d-1 망에는 없는)
+print("\n=== 신규 껍질만의 한계 결합에너지(새로 추가된 허브의 결합에너지만) ===")
+prev_keys = None
+for d in depths:
+    nodes_d = results[d]['nodes']; H_d = results[d]['H']; theta_d = results[d]['theta']; idx_d = results[d]['idx']
+    keys_d = set(nodes_d)
+    if prev_keys is None:
+        new_keys = keys_d  # depth=0은 전부 '신규'
+    else:
+        new_keys = keys_d - prev_keys
+    # 신규 노드가 관련된 엣지(적어도 한쪽이 신규)의 결합에너지 합 / 신규노드수
+    edges_d = list(H_d.edges())
+    e_new = 0.0
+    for a,b in edges_d:
+        if a in new_keys or b in new_keys:
+            dth = theta_d[idx_d[a]] - theta_d[idx_d[b]]
+            e_new += 0.5*(1-np.cos(dth))*0.5  # K=0.5, 신규관련 엣지는 두 신규노드가 겹치면 중복방지 위해 0.5 가중(근사)
+    marginal = e_new/len(new_keys) if len(new_keys)>0 else float('nan')
+    print(f"  depth={d}: 신규허브수={len(new_keys)}, 신규관련 결합에너지 합={e_new:.3f}, 신규허브당={marginal:.5f}")
+    prev_keys = keys_d

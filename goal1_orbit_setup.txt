@@ -1,0 +1,91 @@
+"""로드맵 목표1: 이미 확립된 그래프라플라시안 포아송장(§macro, Ewald합 완료
+2026-07-27)의 실제 격자 그린함수 G(r)을 오늘의 벡터화 Bloch 인프라로 직접
+재계산하고, 이 "이상화 아닌 실측" 힘법칙으로 두 질량 사이에 진짜 궤도(각운동량
+보존 원/타원궤도, 일반화된 케플러 제3법칙)가 나오는지 검증한다.
+"""
+import numpy as np
+from scipy.stats import linregress
+from scipy.integrate import solve_ivp
+
+basis = np.load('basis_data.npy', allow_pickle=True).item()
+basis_items = list(basis.items())
+n_basis = len(basis_items)
+L_const = 2.0
+canon_pos = {fk: np.array(fk) for fk, _ in basis_items}
+fk_list = [fk for fk, _ in basis_items]
+fk_idx = {fk: i for i, fk in enumerate(fk_list)}
+def frac_key(p, nd=4): return tuple(np.round(np.mod(p, L_const), nd))
+
+hoppings = []; degree = np.zeros(n_basis)
+for a_idx, (fk_a, b) in enumerate(basis_items):
+    pa = canon_pos[fk_a]
+    degree[a_idx] = len(b['template'])
+    for rel, nbr_type in b['template']:
+        p_nbr = pa + rel
+        fk_b = frac_key(p_nbr)
+        b_idx = fk_idx[fk_b]
+        pb_canon = canon_pos[fk_b]
+        R_int = np.round((p_nbr - pb_canon) / L_const).astype(int)
+        hoppings.append((a_idx, b_idx, R_int))
+hop_a = np.array([h[0] for h in hoppings])
+hop_b = np.array([h[1] for h in hoppings])
+hop_R = np.array([h[2] for h in hoppings]) * L_const
+
+def build_Lk_batch(kflat):
+    Nktot = kflat.shape[0]
+    phase = np.exp(1j*(hop_R @ kflat.T))
+    Lk_stack = np.zeros((Nktot, n_basis, n_basis), dtype=complex)
+    for idx in range(len(hop_a)):
+        Lk_stack[:, hop_a[idx], hop_b[idx]] += -1.0*phase[idx]
+    for i in range(n_basis):
+        Lk_stack[:, i, i] += degree[i]
+    return Lk_stack
+
+a_ref = 0
+
+def precompute_L_bands(Nk):
+    ks = (2*np.pi/(Nk*L_const)) * (np.arange(Nk) - Nk//2)
+    KX,KY,KZ = np.meshgrid(ks,ks,ks, indexing='ij')
+    kflat = np.stack([KX.ravel(),KY.ravel(),KZ.ravel()], axis=1)
+    Lk_stack = build_Lk_batch(kflat)
+    evals_all, evecs_all = np.linalg.eigh(Lk_stack)
+    weights_all = np.abs(evecs_all[:, a_ref, :])**2
+    return kflat, evals_all, weights_all
+
+print("Bloch L(k) 밴드 사전계산(Nk=28)...")
+Nk = 28
+kflat, evals_all, weights_all = precompute_L_bands(Nk)
+Nktot = kflat.shape[0]
+# k=0(영모드) 제외
+nonzero_mask = np.linalg.norm(kflat, axis=1) > 1e-9
+kflat_nz = kflat[nonzero_mask]
+evals_nz = evals_all[nonzero_mask]
+weights_nz = weights_all[nonzero_mask]
+print(f"k점수(영모드제외): {nonzero_mask.sum()}")
+
+def G_real(R_phys):
+    """실제 위치 R_phys(연속좌표, 3-vector)에서 그린함수 값(단일기저원자 self-Green)."""
+    Gk = np.sum(weights_nz/evals_nz, axis=1)  # (Nktot_nz,)
+    phase = np.exp(1j*(kflat_nz @ R_phys))
+    return np.real(np.sum(Gk*phase))/Nktot
+
+print("널대조군: 원점 근처 G(r) 몇 개 값 확인")
+for r in [1.0, 2.0, 3.0, 5.0]:
+    print(f"  r={r}: G={G_real(np.array([r,0,0])):.6e}")
+
+def F_real(r, dr=0.01):
+    """실측 그린함수를 수치미분해 힘의 크기(중심을 향하는 인력, 양수) 계산."""
+    Gp = G_real(np.array([r+dr,0,0]))
+    Gm = G_real(np.array([r-dr,0,0]))
+    return -(Gp-Gm)/(2*dr)  # G가 감소함수이므로 F>0 = 인력
+
+print("\n=== 실측 힘법칙 F(r) 표본 및 국소지수 ===")
+r_test = np.array([2.0,3.0,4.0,5.0,7.0,9.0])
+F_vals = np.array([F_real(r) for r in r_test])
+for r,F in zip(r_test,F_vals):
+    print(f"  r={r}: F(r)={F:.6e}")
+logr=np.log(r_test); logF=np.log(np.abs(F_vals))
+res = linregress(logr,logF)
+print(f"실측 힘법칙 지수: F~r^{res.slope:.4f} (R2={res.rvalue**2:.6f})")
+
+np.save('bloch_L_force_table.npy', {'r':r_test,'F':F_vals,'slope':res.slope}, allow_pickle=True)
