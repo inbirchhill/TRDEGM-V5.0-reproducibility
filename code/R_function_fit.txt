@@ -1,0 +1,105 @@
+"""depth=시간 트랙 후속: 재규격화 사상 R(lambda)=a*lambda+b 의 계수 a_n, b_n (n=1..4,
+전환 depth(n-1)->n)에 대해 두 성분(지수적 b, 거듭제곱형 (a-1))을 정식으로 피팅하고
+불확도(신뢰구간)까지 정량화한다. 기존 "crossover depth~50" 외삽(외부자문, 신뢰구간 없음)의
+실제 통계적 신뢰도를 점검한다.
+"""
+import numpy as np
+from scipy.optimize import curve_fit
+
+# 기존 4개 데이터점 (0718/0718_이후 메모, V4_0_최종본.tex 근거박스와 일치)
+n = np.array([1,2,3,4])  # 전환 index: depth(n-1)->n
+a = np.array([1.108, 1.044, 1.023, 1.014])
+b = np.array([2.86, 2.36, 1.95, 1.66])
+am1 = a - 1.0
+
+print("=== 원자료 ===")
+for i in range(4):
+    print(f"  n={n[i]}: a={a[i]:.4f} (a-1)={am1[i]:.4f}  b={b[i]:.4f}")
+
+# ---- b: 지수적 감쇠 b_n = C * r^n ----
+def exp_model(n, C, r): return C * r**n
+p0 = [4.0, 0.8]
+popt_b, pcov_b = curve_fit(exp_model, n, b, p0=p0, maxfev=10000)
+perr_b = np.sqrt(np.diag(pcov_b))
+resid_b = b - exp_model(n, *popt_b)
+ss_res = np.sum(resid_b**2); ss_tot = np.sum((b-b.mean())**2)
+r2_b = 1 - ss_res/ss_tot
+print(f"\n=== b_n = C*r^n 피팅 ===")
+print(f"  C = {popt_b[0]:.4f} +- {perr_b[0]:.4f}")
+print(f"  r = {popt_b[1]:.4f} +- {perr_b[1]:.4f}")
+print(f"  R^2 = {r2_b:.5f}  (자유도 = {len(n)-2})")
+
+# ---- (a-1): 거듭제곱 (a-1)_n = D * n^{-p} ----
+def power_model(n, D, p): return D * n**(-p)
+p0 = [0.11, 1.5]
+popt_a, pcov_a = curve_fit(power_model, n, am1, p0=p0, maxfev=10000)
+perr_a = np.sqrt(np.diag(pcov_a))
+resid_a = am1 - power_model(n, *popt_a)
+ss_res_a = np.sum(resid_a**2); ss_tot_a = np.sum((am1-am1.mean())**2)
+r2_a = 1 - ss_res_a/ss_tot_a
+print(f"\n=== (a_n-1) = D*n^(-p) 피팅 ===")
+print(f"  D = {popt_a[0]:.4f} +- {perr_a[0]:.4f}")
+print(f"  p(지수) = {popt_a[1]:.4f} +- {perr_a[1]:.4f}")
+print(f"  R^2 = {r2_a:.5f}  (자유도 = {len(n)-2})")
+
+# 비교: (a-1)을 지수모형으로도 피팅해서 어느 쪽이 더 잘 맞는지 재확인
+popt_a_exp, pcov_a_exp = curve_fit(exp_model, n, am1, p0=[0.15,0.6], maxfev=10000)
+resid_ae = am1 - exp_model(n, *popt_a_exp)
+r2_a_exp = 1 - np.sum(resid_ae**2)/ss_tot_a
+print(f"  [대조] (a-1)을 지수모형으로 피팅: R^2 = {r2_a_exp:.5f}  (거듭제곱형과 비교)")
+
+# b도 거듭제곱형으로 대조피팅
+popt_b_pow, pcov_b_pow = curve_fit(power_model, n, b, p0=[3,0.3], maxfev=10000)
+resid_bp = b - power_model(n, *popt_b_pow)
+r2_b_pow = 1 - np.sum(resid_bp**2)/ss_tot
+print(f"  [대조] b를 거듭제곱형으로 피팅: R^2 = {r2_b_pow:.5f}  (지수형과 비교)")
+
+# ---- Leave-one-out (LOO) 안정성 점검: 4점 중 1점씩 빼고 재피팅했을 때 파라미터가 얼마나 흔들리는가 ----
+print("\n=== Leave-one-out 안정성 점검 (자유도가 거의 없는 4점 피팅의 신뢰도 확인) ===")
+for leave in range(4):
+    mask = np.ones(4, dtype=bool); mask[leave]=False
+    nn, bb, aa = n[mask], b[mask], am1[mask]
+    try:
+        pb,_ = curve_fit(exp_model, nn, bb, p0=[4,0.8], maxfev=10000)
+        pa,_ = curve_fit(power_model, nn, aa, p0=[0.11,1.5], maxfev=10000)
+        print(f"  n={n[leave]} 제외: b쪽 (C,r)=({pb[0]:.3f},{pb[1]:.3f})  (a-1)쪽 (D,p)=({pa[0]:.3f},{pa[1]:.3f})")
+    except Exception as e:
+        print(f"  n={n[leave]} 제외: 피팅 실패 ({e})")
+
+# ---- crossover 재추정: 두 채널의 "상대적 크기"가 같아지는 지점 ----
+# 정의: b_n(정규화 안됨, 절대크기)과 (a_n-1)*<lambda> 비교는 물리적 정의가 불분명하므로,
+# 대신 "각 채널이 초기값(n=1) 대비 몇 % 남았는가"로 상대 감쇠곡선을 비교한다.
+C, r = popt_b; D, p = popt_a
+b1 = exp_model(1, C, r); a1 = power_model(1, D, p)
+def frac_b(nn): return exp_model(nn, C, r)/b1
+def frac_a(nn): return power_model(nn, D, p)/a1
+
+from scipy.optimize import brentq
+def diff(nn): return frac_b(nn) - frac_a(nn)
+# 넓은 범위에서 근 탐색
+ns_test = np.linspace(1, 500, 5000)
+diffs = [frac_b(x)-frac_a(x) for x in ns_test]
+sign_changes = [ns_test[i] for i in range(len(diffs)-1) if diffs[i]*diffs[i+1] < 0]
+print(f"\n=== 상대감쇠 교차점 재추정 ===")
+print(f"  b: n=1 대비 잔존비율 곡선, (a-1): n=1 대비 잔존비율 곡선의 교차 depth = {sign_changes}")
+
+# ---- 몬테카를로로 교차점 추정치의 불확도 정량화 ----
+print("\n=== 교차 depth 추정의 몬테카를로 불확도 (공분산행렬 기반 재표집, 2000회) ===")
+rng = np.random.default_rng(42)
+samples_b = rng.multivariate_normal(popt_b, pcov_b, size=2000)
+samples_a = rng.multivariate_normal(popt_a, pcov_a, size=2000)
+crossings = []
+for (Cs, rs), (Ds, ps) in zip(samples_b, samples_a):
+    if not (0 < rs < 1) or ps <= 0 or Cs <= 0 or Ds <= 0:
+        continue
+    b1s = Cs*rs**1; a1s = Ds*1**(-ps)
+    def diffs_fn(x): return (Cs*rs**x)/b1s - (Ds*x**(-ps))/a1s
+    xs = np.linspace(1, 500, 2000)
+    vals = diffs_fn(xs)
+    sc = np.where(np.diff(np.sign(vals)) != 0)[0]
+    if len(sc) > 0:
+        crossings.append(xs[sc[0]])
+crossings = np.array(crossings)
+print(f"  유효 표본수: {len(crossings)}/2000")
+print(f"  교차 depth 중앙값 = {np.median(crossings):.1f}")
+print(f"  90% 구간 = [{np.percentile(crossings,5):.1f}, {np.percentile(crossings,95):.1f}]")

@@ -1,0 +1,55 @@
+"""지수 p~1.265가 진짜 안정적 상수인지, 더 많은 Delta_omega 값에서
+재확인. 배율 0.25,0.75,1.5,3을 추가."""
+import numpy as np
+from swing_eom import build_system, rk4_step
+
+nodes, idx, n_hubs, Omega_base_orig, edges, H, cluster_idx = build_system(depth=0, buffer_radius=6)
+gamma, dt = 0.3, 0.01
+N_arr = np.array([H.nodes[n]['N'] for n in nodes])
+OM6 = 2*np.pi
+OM12_orig = 2*np.pi/np.sqrt(2)
+dOm_orig = OM6 - OM12_orig
+
+def make_omega(dOm_scale):
+    om12_new = OM6 - dOm_orig*dOm_scale
+    Omega_new = Omega_base_orig.copy()
+    Omega_new[N_arr==12] = om12_new
+    return Omega_new
+
+def lyapunov_estimate(Omega_base, K, seed=0, n_transient=15000, n_measure=5000, eps0=1e-8, renorm_every=50):
+    rng = np.random.default_rng(seed)
+    state = np.concatenate([rng.uniform(0,2*np.pi,n_hubs), np.zeros(n_hubs)])
+    for _ in range(n_transient):
+        state = rk4_step(state, dt, n_hubs, Omega_base, edges, gamma, K)
+    pert = rng.normal(0, 1, 2*n_hubs); pert /= np.linalg.norm(pert)
+    state2 = state + eps0*pert
+    log_sum = 0.0; n_renorm = 0
+    for t in range(n_measure):
+        state = rk4_step(state, dt, n_hubs, Omega_base, edges, gamma, K)
+        state2 = rk4_step(state2, dt, n_hubs, Omega_base, edges, gamma, K)
+        if (t+1) % renorm_every == 0:
+            diff = state2 - state; d = np.linalg.norm(diff)
+            if d > 1e-300:
+                log_sum += np.log(d/eps0); n_renorm += 1
+                state2 = state + (diff/d)*eps0
+    if n_renorm == 0: return float('nan')
+    return log_sum/(n_renorm*renorm_every*dt)
+
+# 예측기반 탐색범위 좁히기: K_chaos ~ 0.0487 * dOm^1.265
+def predict_K(dOm): return 0.0487*dOm**1.265
+
+for scale in [0.25, 0.75, 1.5, 3.0]:
+    dOm_now = dOm_orig*scale
+    K_pred = predict_K(dOm_now)
+    Omega_new = make_omega(scale)
+    print(f"=== 배율={scale}, Delta_omega={dOm_now:.4f}, 예측K={K_pred:.4f} ===", flush=True)
+    # 예측값 근방 +-40% 범위를 스캔
+    K_range = np.linspace(K_pred*0.5, K_pred*1.6, 7)
+    found = None
+    for K in K_range:
+        lyap = np.mean([lyapunov_estimate(Omega_new, K, seed=s) for s in range(2)])
+        tag = " <-- 카오스" if lyap>0.01 else ""
+        print(f"  K={K:.4f}: 리아푸노프={lyap:.4f}{tag}", flush=True)
+        if lyap>0.01 and found is None:
+            found = K
+    print(f"  => 이 배율에서 카오스 발견 K≈{found}\n", flush=True)

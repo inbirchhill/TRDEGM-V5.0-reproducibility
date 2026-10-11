@@ -1,0 +1,81 @@
+"""
+A4: 각도항 확장 결합 -- 위치섹터에 이미 있는 각도항(MEAM류, Stage2 후보A)처럼,
+위상결합도 3체(각도의존) 형태로 확장. 허브 i의 두 이웃 j,k 사이 각도 theta_jik를
+codec처럼 위상결합 K_ijk에 반영: K_ijk = K0*(1+beta*cos(theta_jik))
+(코사인은 완전한 회전불변 스칼라이므로 T/O 무관 항상 허용 -- A1/A2/A5보다 고차 항)
+"""
+import numpy as np
+from scipy import stats
+from swing_eom import build_system
+
+def main():
+    nodes, idx, n_hubs, Omega0, edges, H, cluster_idx = build_system(depth=0, buffer_radius=6)
+    pos0 = np.array([H.nodes[n]['pos'] for n in nodes])
+
+    # 각 허브의 이웃쌍(j,k) 조합에서 각도 theta_jik 계산, 허브별 평균각도 코사인
+    neighbor_map = {i: [] for i in range(n_hubs)}
+    for a,b in edges:
+        neighbor_map[a].append(b); neighbor_map[b].append(a)
+
+    avg_cos = np.zeros(n_hubs)
+    for i in range(n_hubs):
+        nbrs = neighbor_map[i]
+        if len(nbrs) < 2:
+            avg_cos[i] = 0.0; continue
+        vecs = pos0[nbrs] - pos0[i]
+        vecs = vecs/np.linalg.norm(vecs,axis=1,keepdims=True)
+        cosines = []
+        for a in range(len(nbrs)):
+            for b in range(a+1,len(nbrs)):
+                cosines.append(np.dot(vecs[a],vecs[b]))
+        avg_cos[i] = np.mean(cosines) if cosines else 0.0
+
+    K_const = 0.28
+
+    def run_one(beta, seed, perm=None, T=40.0, dt=0.02, grace=15.0):
+        rng = np.random.default_rng(seed)
+        ac = avg_cos[perm] if perm is not None else avg_cos
+        # 엣지별 결합강도: 두 끝점의 각도-코사인 평균으로 변조(대칭적 처리)
+        K_edges = K_const*(1+beta*0.5*(ac[edges[:,0]]+ac[edges[:,1]]))
+        theta = rng.uniform(0,2*np.pi,n_hubs); v=np.zeros(n_hubs)
+        n_steps=int(T/dt); rs=[]
+        for step in range(n_steps):
+            dthij = theta[edges[:,0]]-theta[edges[:,1]]; s=np.sin(dthij)
+            coup=np.zeros(n_hubs)
+            np.add.at(coup,edges[:,0],-K_edges*s); np.add.at(coup,edges[:,1],K_edges*s)
+            dv = Omega0-v+coup
+            theta=theta+dt*v; v=v+dt*dv
+            t=step*dt
+            if t>grace: rs.append(np.abs(np.mean(np.exp(1j*theta))))
+        return np.mean(rs)
+
+    n_seeds=15; seeds=list(range(n_seeds))
+    print("=== A4: 각도항(3체) 결합, K0=0.28 ===")
+    print(f"(참고: avg_cos 범위 {avg_cos.min():.3f}~{avg_cos.max():.3f})")
+    for beta in [0.1,0.3,0.6]:
+        f0=np.array([run_one(0.0,s) for s in seeds])
+        fB=np.array([run_one(beta,s) for s in seeds])
+        delta=fB-f0
+        t,p=stats.ttest_1samp(delta,0.0)
+        ci=1.96*delta.std(ddof=1)/np.sqrt(n_seeds)
+        print(f"  beta={beta}: delta={delta.mean():+.5f}±{ci:.5f} p={p:.4f} {'유의' if p<0.05 else ''}")
+
+    print("\n=== 셔플대조군 (beta=0.3) ===")
+    beta=0.3
+    def get_delta(perm):
+        f0=np.array([run_one(0.0,s,perm) for s in seeds])
+        fB=np.array([run_one(beta,s,perm) for s in seeds])
+        return (fB-f0).mean()
+    d_real=get_delta(None)
+    print(f"원본 delta={d_real:+.5f}")
+    shufs=[]
+    for ss in range(30):
+        perm=np.random.default_rng(7000+ss).permutation(n_hubs)
+        shufs.append(get_delta(perm))
+    shufs=np.array(shufs)
+    print(f"셔플30회 평균={shufs.mean():+.5f} std={shufs.std():.5f}")
+    sigma=(d_real-shufs.mean())/shufs.std() if shufs.std()>0 else float('nan')
+    print(f"원본 위치: {sigma:.2f}sigma, 백분위={np.mean(shufs<d_real)*100:.1f}%ile")
+
+if __name__ == "__main__":
+    main()

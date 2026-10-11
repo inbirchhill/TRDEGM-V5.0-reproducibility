@@ -1,0 +1,71 @@
+"""
+A1: 결합상수(K) 대신 고유진동수(Omega)를 국소밀도(rho_i)로 변조하는 코덱 후보.
+Omega_i(x) = Omega_i^0 * (1 + beta*rho_i(x))
+rho_i는 FS포텐셜의 임베딩밀도(이웃과의 phi합) -- 완전한 회전불변 스칼라, T/O 무관 항상 허용.
+"""
+import numpy as np
+from scipy import stats
+from swing_eom import build_system
+
+def main():
+    nodes, idx, n_hubs, Omega0, edges, H, cluster_idx = build_system(depth=0, buffer_radius=6)
+    pos0 = np.array([H.nodes[n]['pos'] for n in nodes])
+    r0_edges = np.linalg.norm(pos0[edges[:,0]]-pos0[edges[:,1]], axis=1)
+    q_param = 4.0
+    def phi(s): return np.exp(-2*q_param*s)
+
+    def rho_of(x):
+        d = x[edges[:,0]]-x[edges[:,1]]
+        r = np.linalg.norm(d,axis=1)
+        strain = r/r0_edges - 1.0
+        ph = phi(strain)
+        rho = np.zeros(n_hubs)
+        np.add.at(rho, edges[:,0], ph); np.add.at(rho, edges[:,1], ph)
+        return rho / rho.max()  # 정규화(0~1)
+
+    K_const = 0.28  # 진짜임계점
+
+    def rhs(theta, v, x_disp, beta, gamma=1.0):
+        dth = v
+        dthij = theta[edges[:,0]] - theta[edges[:,1]]
+        s = np.sin(dthij)
+        coup = np.zeros(n_hubs)
+        np.add.at(coup, edges[:,0], -K_const*s)
+        np.add.at(coup, edges[:,1],  K_const*s)
+        rho = rho_of(x_disp)
+        Omega_eff = Omega0*(1+beta*rho)
+        dv = gamma*Omega_eff - gamma*v + coup
+        return dth, dv
+
+    def rk4(theta,v,dt,x_disp,beta):
+        k1t,k1v=rhs(theta,v,x_disp,beta)
+        k2t,k2v=rhs(theta+0.5*dt*k1t,v+0.5*dt*k1v,x_disp,beta)
+        k3t,k3v=rhs(theta+0.5*dt*k2t,v+0.5*dt*k2v,x_disp,beta)
+        k4t,k4v=rhs(theta+dt*k3t,v+dt*k3v,x_disp,beta)
+        return theta+(dt/6)*(k1t+2*k2t+2*k3t+k4t), v+(dt/6)*(k1v+2*k2v+2*k3v+k4v)
+
+    def run_one(beta, kick_amp, seed, T=40.0, dt=0.02, grace=15.0):
+        rng = np.random.default_rng(seed)
+        x_disp = pos0 + rng.normal(scale=kick_amp, size=pos0.shape)
+        theta = rng.uniform(0,2*np.pi,n_hubs); v=np.zeros(n_hubs)
+        n_steps=int(T/dt); rs=[]
+        for step in range(n_steps):
+            theta,v = rk4(theta,v,dt,x_disp,beta)
+            t=step*dt
+            if t>grace:
+                rs.append(np.abs(np.mean(np.exp(1j*theta))))
+        return np.mean(rs)
+
+    n_seeds=20; seeds=list(range(n_seeds))
+    print("=== A1: Omega(rho) 변조 코덱, K0=0.28, seed=20개 ===")
+    for beta in [0.05, 0.1, 0.2, 0.4]:
+        f0 = np.array([run_one(0.0, 0.3, s) for s in seeds])
+        fB = np.array([run_one(beta, 0.3, s) for s in seeds])
+        delta = fB-f0
+        t,p = stats.ttest_1samp(delta,0.0)
+        ci = 1.96*delta.std(ddof=1)/np.sqrt(n_seeds)
+        print(f"  beta={beta}: delta=<r>변화={delta.mean():+.5f}±{ci:.5f}  p={p:.4f} "
+              f"{'*** 유의 ***' if p<0.05 else ''}")
+
+if __name__ == "__main__":
+    main()

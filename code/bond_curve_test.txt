@@ -1,0 +1,44 @@
+"""§거시/미시 확장(항목1, 원자/분자 결합 재현 다방면 접근 - 2): '결합'(bond) 개념을
+실제로 원자간 결합에너지 곡선(반발벽 + 우물 + 해리한계)과 구조적으로 비교.
+동결환경(bond_stiffness.py와 동일 근사)에서 결합길이 r을 넓은 범위로 스윕해
+E_bond(r) 전체 곡선의 모양(반발/우물/해리)을 직접 확인."""
+import numpy as np
+
+q, p, eps = 4.0, 8.0, 1.0
+RHO6, RHO12 = 10.0, 20.0
+def Fp(rho):  return -eps/(2*np.sqrt(rho))
+def F(rho): return -eps*np.sqrt(rho)
+def calibrate_A(ri,rj,r0): return -(2*q/p)*(Fp(ri)+Fp(rj))
+
+bonds = {
+    "6-6":   dict(r0=1.0, rho_i=RHO6, rho_j=RHO6),
+    "6-12":  dict(r0=0.8660254, rho_i=RHO6, rho_j=RHO12),
+    "12-12": dict(r0=1.4142136, rho_i=RHO12, rho_j=RHO12),
+}
+
+def phi(r,r0): return np.exp(-2*q*(r/r0-1))
+def V(r,r0,A): return A*np.exp(-p*(r/r0-1))
+
+print("=== 결합타입별 E_bond(r) 곡선: 반발벽/우물/해리한계 확인 ===")
+for name, b in bonds.items():
+    r0, rho_i, rho_j = b['r0'], b['rho_i'], b['rho_j']
+    A = calibrate_A(rho_i, rho_j, r0)
+    rs = np.linspace(0.4*r0, 4.0*r0, 400)
+    # 동결환경: 다른 이웃의 rho 기여는 고정(rho_bulk - 1), 이 결합만 변화
+    rho_i_r = rho_i - 1 + phi(rs, r0)
+    rho_j_r = rho_j - 1 + phi(rs, r0)
+    E = F(rho_i_r) + F(rho_j_r) + V(rs, r0, A)
+    E0 = E[np.argmin(np.abs(rs-r0))]
+    E_inf = F(rho_i-1) + F(rho_j-1) + 0.0   # r->inf: phi,V -> 0
+    idx_min = np.argmin(E)
+    r_min = rs[idx_min]; E_min = E[idx_min]
+    well_depth = E_inf - E_min  # 양수면 진짜 '결합'(뭉치는 게 더 낮은 에너지)
+    print(f"\n[{name}] r0(공칭)={r0:.4f}")
+    print(f"  실제 에너지최소 위치 r_min={r_min:.4f} (공칭 r0 대비 오차 {abs(r_min-r0)/r0*100:.2f}%)")
+    print(f"  E(r_min)={E_min:.4f}, E(r->inf)={E_inf:.4f}, 우물깊이(해리에너지 아날로그)={well_depth:.4f}")
+    # 반발벽 확인: r_min보다 작은 r에서 에너지가 가파르게 증가하는지
+    r_compress = 0.7*r0
+    E_compress = F(rho_i-1+phi(r_compress,r0)) + F(rho_j-1+phi(r_compress,r0)) + V(r_compress,r0,A)
+    print(f"  압축시(r=0.7 r0) E={E_compress:.4f} (E_min 대비 {E_compress-E_min:+.4f}, 양수면 반발벽 확인)")
+    is_bond = well_depth > 0
+    print(f"  -> {'진짜 결합(뭉친 상태가 더 낮은 에너지)' if is_bond else '결합 아님(뭉치지 않는 게 유리)'}")

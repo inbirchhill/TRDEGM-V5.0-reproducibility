@@ -1,0 +1,61 @@
+"""'주도하는 주관 프로세스' 조작적 정의 1차 시도: 고유벡터 중심성(구조적으로
+"영향력이 큰" 노드)이 실제 동역학에서 관측된 '핵심(core)' 클러스터와
+일치하는지 검정 -- 동기화/통합과는 다른 질문("무엇이 이끄는가")을 테스트."""
+import numpy as np
+import networkx as nx
+from swing_eom import build_system, rk4_step
+
+nodes, idx, n_hubs, Omega_base, edges, H, cluster_idx = build_system(depth=0, buffer_radius=6)
+N_arr = np.array([H.nodes[n]['N'] for n in nodes])
+gamma, dt = 0.3, 0.01
+
+# 1) 구조적 지표: 고유벡터 중심성, 배위수(degree)
+eig_cent = nx.eigenvector_centrality(H, max_iter=1000)
+eig_arr = np.array([eig_cent[n] for n in nodes])
+deg_arr = np.array([H.degree(n) for n in nodes])
+
+# 2) 동역학적 핵심(core) 재계산: K=0.11(핵심+위성 구조가 뚜렷한 지점)
+def get_core_membership(K, seed=0, n_transient=20000, window=4000):
+    rng = np.random.default_rng(seed)
+    state = np.concatenate([rng.uniform(0,2*np.pi,n_hubs), np.zeros(n_hubs)])
+    for _ in range(n_transient):
+        state = rk4_step(state, dt, n_hubs, Omega_base, edges, gamma, K)
+    dtheta_hist = np.zeros((window, len(edges)))
+    theta_i_unwrap = state[edges[:,0]].copy(); theta_j_unwrap = state[edges[:,1]].copy()
+    prev_theta = state[:n_hubs].copy()
+    for t in range(window):
+        state = rk4_step(state, dt, n_hubs, Omega_base, edges, gamma, K)
+        theta = state[:n_hubs]
+        dstep = theta-prev_theta; dstep=(dstep+np.pi)%(2*np.pi)-np.pi
+        theta_i_unwrap += dstep[edges[:,0]]; theta_j_unwrap += dstep[edges[:,1]]
+        dtheta_hist[t] = theta_i_unwrap-theta_j_unwrap
+        prev_theta = theta
+    span = dtheta_hist.max(axis=0)-dtheta_hist.min(axis=0)
+    locked = span < np.pi
+    G2 = nx.Graph(); G2.add_nodes_from(range(n_hubs))
+    for e_idx,is_l in enumerate(locked):
+        if is_l: G2.add_edge(edges[e_idx,0], edges[e_idx,1])
+    comps = sorted(nx.connected_components(G2), key=len, reverse=True)
+    core = comps[0] if comps else set()
+    return core
+
+core = get_core_membership(0.11)
+in_core = np.array([1 if i in core else 0 for i in range(n_hubs)])
+print(f"핵심 클러스터 크기: {in_core.sum()}/{n_hubs}")
+
+print(f"\n고유벡터중심성: 핵심 평균={eig_arr[in_core==1].mean():.5f}  비핵심 평균={eig_arr[in_core==0].mean():.5f}")
+print(f"배위수: 핵심 평균={deg_arr[in_core==1].mean():.3f}  비핵심 평균={deg_arr[in_core==0].mean():.3f}")
+
+# 상관계수
+corr_eig = np.corrcoef(eig_arr, in_core)[0,1]
+corr_deg = np.corrcoef(deg_arr, in_core)[0,1]
+print(f"\n상관계수(고유벡터중심성 vs 핵심소속): {corr_eig:.3f}")
+print(f"상관계수(배위수 vs 핵심소속): {corr_deg:.3f}")
+
+# 종(N6/N12)별로도 분리해서 확인 (교란변수 배제)
+print("\n종별 분리:")
+for sp in [6,12]:
+    mask = N_arr==sp
+    if mask.sum()>3:
+        c = np.corrcoef(eig_arr[mask], in_core[mask])[0,1] if in_core[mask].std()>0 else float('nan')
+        print(f"  N{sp}: 고유벡터중심성-핵심소속 상관={c:.3f} (n={mask.sum()}, 핵심비율={in_core[mask].mean():.2f})")

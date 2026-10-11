@@ -1,0 +1,72 @@
+"""사용자 제안: 고유진동수(Omega) 차이를 '온도차'처럼 다뤄, 결합항분산(요동/흐름)이
+진동수차에 대해 어떤 법칙을 따르는지 검증 -- 열전도 푸리에법칙(흐름~온도차, 작은 차이에서
+선형)과 유사한 관계가 있는지 확인."""
+import numpy as np, time
+from swing_eom import rk4_step
+
+def build_synthetic_freq(n_A, n_B, same_deg, cross_deg, omega_A, omega_B, seed=0):
+    rng = np.random.default_rng(seed)
+    n = n_A+n_B
+    Omega = np.array([omega_A]*n_A + [omega_B]*n_B)
+    A_idx = np.arange(n_A); B_idx = np.arange(n_A, n_A+n_B)
+    def random_regular_like(idx_list, deg, rng):
+        idx_list=list(idx_list); es=set(); stubs=[]
+        for i in idx_list: stubs += [i]*deg
+        rng.shuffle(stubs)
+        for k in range(0,len(stubs)-1,2):
+            a,b=stubs[k],stubs[k+1]
+            if a!=b: es.add((min(a,b),max(a,b)))
+        return es
+    edges_set = random_regular_like(A_idx, same_deg, rng) | random_regular_like(B_idx, same_deg, rng)
+    cross_stubs_A=[]; 
+    for i in A_idx: cross_stubs_A += [i]*cross_deg
+    cross_deg_B = max(1, round(n_A*cross_deg/n_B))
+    cross_stubs_B=[]
+    for j in B_idx: cross_stubs_B += [j]*cross_deg_B
+    rng.shuffle(cross_stubs_A); rng.shuffle(cross_stubs_B)
+    m = min(len(cross_stubs_A), len(cross_stubs_B))
+    for k in range(m):
+        a,b=cross_stubs_A[k],cross_stubs_B[k]; edges_set.add((min(a,b),max(a,b)))
+    edges = np.array(list(edges_set))
+    return n, Omega, edges
+
+def measure_var(n, Omega, edges, K, gamma=1.0, dt=0.01, n_steps=1500, transient=1000, seed=0):
+    rng = np.random.default_rng(seed)
+    state = np.concatenate([rng.uniform(0,2*np.pi,n), np.zeros(n)])
+    for _ in range(transient):
+        state = rk4_step(state, dt, n, Omega, edges, gamma, K)
+    coupling = np.zeros((n_steps, n))
+    for t in range(n_steps):
+        theta = state[:n]; dth=theta[edges[:,0]]-theta[edges[:,1]]; s=np.sin(dth)
+        np.add.at(coupling[t], edges[:,0], -K*s); np.add.at(coupling[t], edges[:,1], K*s)
+        state = rk4_step(state, dt, n, Omega, edges, gamma, K)
+    return coupling.var(axis=0)
+
+n_A,n_B = 60,60; same_deg=6; cross_deg=7; K=0.1
+omega_A = 2*np.pi
+print("=== '진동수차(deltaOmega)'를 온도차처럼 스윕하며 A타입 요동(분산) 측정 ===")
+print(f"{'deltaOmega':>10} {'ratio(A/B)':>10} {'A평균분산±SEM':>18}")
+t0=time.time()
+results=[]
+for ratio in [1.0, 1.05, 1.1, 1.2, 1.3, 1.4142, 1.6, 2.0, 3.0]:
+    omega_B = omega_A/ratio
+    dOmega = omega_A-omega_B
+    n, Omega, edges = build_synthetic_freq(n_A,n_B,same_deg,cross_deg,omega_A,omega_B,seed=1)
+    vs=[]
+    for seed in range(5):
+        v = measure_var(n, Omega, edges, K, seed=seed)
+        vs.append(v[:n_A].mean())
+    vs=np.array(vs); m,sem = vs.mean(), vs.std(ddof=1)/np.sqrt(5)
+    results.append((dOmega, ratio, m, sem))
+    print(f"{dOmega:10.4f} {ratio:10.4f} {m:12.5f}±{sem:.5f}")
+print(f"소요 {time.time()-t0:.1f}s")
+
+print("\n=== 작은 진동수차 영역에서 선형(푸리에법칙류) 관계 확인 ===")
+small = [(d,m) for d,r,m,s in results if d < 1.0]
+if len(small)>=2:
+    d_arr = np.array([d for d,m in small]); m_arr=np.array([m for d,m in small])
+    coef = np.polyfit(d_arr, m_arr, 1)
+    pred = np.polyval(coef, d_arr)
+    ss_tot = np.sum((m_arr-m_arr.mean())**2)
+    r2 = 1-np.sum((m_arr-pred)**2)/ss_tot if ss_tot>0 else float('nan')
+    print(f"선형 피팅: 분산 ~ {coef[0]:.4f}*dOmega + {coef[1]:.4f}, R^2={r2:.4f}")

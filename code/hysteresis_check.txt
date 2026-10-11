@@ -1,0 +1,49 @@
+"""전이가 연속적(2차, 란다우형)인지 불연속적(폭발적, explosive synchronization)인지 판별:
+K를 증가시키며 스캔(이전 K의 정상상태를 다음 K의 초기조건으로 사용) vs 감소시키며 스캔해서
+이력현상(hysteresis)이 있는지 확인. 있으면 = 불연속(1차)전이, 없으면 = 연속(2차, 란다우형)전이."""
+import numpy as np, time
+from swing_eom import build_system, rk4_step
+
+nodes, idx, n_hubs, Omega_base, edges, H, cluster_idx = build_system(depth=0, buffer_radius=6)
+gamma = 0.3
+dt = 0.01
+
+def measure_r(state, n_settle=20000, n_snap=100, sample_every=20, K=None):
+    for _ in range(n_settle):
+        state = rk4_step(state, dt, n_hubs, Omega_base, edges, gamma, K)
+    rs=[]
+    for _ in range(n_snap):
+        for _ in range(sample_every):
+            state = rk4_step(state, dt, n_hubs, Omega_base, edges, gamma, K)
+        theta = state[:n_hubs]
+        rs.append(np.abs(np.mean(np.exp(1j*theta))))
+    return np.mean(rs), np.std(rs), state
+
+K_list = [0.02,0.04,0.06,0.08,0.10,0.11,0.12,0.13,0.14,0.16,0.20]
+
+print("=== K 증가 방향(forward) ===")
+rng = np.random.default_rng(1)
+state = np.concatenate([rng.uniform(0,2*np.pi,n_hubs), np.zeros(n_hubs)])
+fwd = {}
+t0=time.time()
+for K in K_list:
+    rmean, rstd, state = measure_r(state, K=K)
+    fwd[K]=(rmean,rstd)
+    print(f"K={K:5.2f}  <r>={rmean:.4f}  std={rstd:.4f}  ({time.time()-t0:.0f}s)")
+
+print("\n=== K 감소 방향(backward) ===")
+rng = np.random.default_rng(2)
+state = np.concatenate([rng.uniform(0,2*np.pi,n_hubs), np.zeros(n_hubs)])
+# 먼저 완전동기화 상태로 정착
+_,_,state = measure_r(state, n_settle=40000, K=0.5)
+bwd = {}
+for K in reversed(K_list):
+    rmean, rstd, state = measure_r(state, K=K)
+    bwd[K]=(rmean,rstd)
+    print(f"K={K:5.2f}  <r>={rmean:.4f}  std={rstd:.4f}  ({time.time()-t0:.0f}s)")
+
+print("\n=== 비교(이력현상 확인) ===")
+print(f"{'K':>6} {'forward<r>':>12} {'backward<r>':>13} {'차이':>8}")
+for K in K_list:
+    d = abs(fwd[K][0]-bwd[K][0])
+    print(f"{K:6.2f} {fwd[K][0]:12.4f} {bwd[K][0]:13.4f} {d:8.4f}")

@@ -1,0 +1,40 @@
+"""사용자의 개념적 제안(고유진동 전파의 불확실 간섭영역) 검정 1:
+카오스 진단(리아푸노프류) -- 미세하게 다른 두 초기조건의 궤적이
+시간에 따라 지수적으로 벌어지는지(카오스) 확인. K=0.07(안정 의심)과
+K=0.105(카오스 의심)를 대조."""
+import numpy as np
+from swing_eom import build_system, rk4_step
+
+nodes, idx, n_hubs, Omega_base, edges, H, cluster_idx = build_system(depth=0, buffer_radius=6)
+gamma, dt = 0.3, 0.01
+
+def lyapunov_estimate(K, seed=0, n_transient=15000, n_measure=6000, eps0=1e-8, renorm_every=50):
+    rng = np.random.default_rng(seed)
+    state = np.concatenate([rng.uniform(0,2*np.pi,n_hubs), np.zeros(n_hubs)])
+    for _ in range(n_transient):
+        state = rk4_step(state, dt, n_hubs, Omega_base, edges, gamma, K)
+    # 미세 섭동된 궤적
+    pert = rng.normal(0, 1, 2*n_hubs); pert /= np.linalg.norm(pert)
+    state2 = state + eps0*pert
+
+    log_sum = 0.0
+    n_renorm = 0
+    for t in range(n_measure):
+        state = rk4_step(state, dt, n_hubs, Omega_base, edges, gamma, K)
+        state2 = rk4_step(state2, dt, n_hubs, Omega_base, edges, gamma, K)
+        if (t+1) % renorm_every == 0:
+            diff = state2 - state
+            d = np.linalg.norm(diff)
+            if d > 1e-300:
+                log_sum += np.log(d/eps0)
+                n_renorm += 1
+                state2 = state + (diff/d)*eps0  # 재정규화
+    if n_renorm == 0: return float('nan')
+    total_time = n_renorm*renorm_every*dt
+    lyap = log_sum/total_time
+    return lyap
+
+print("리아푸노프 지수 추정(양수=카오스, 음수/0=안정)\n")
+for K in [0.05, 0.07, 0.085, 0.095, 0.100, 0.105, 0.108, 0.110, 0.115, 0.12]:
+    lyaps = [lyapunov_estimate(K, seed=s) for s in range(2)]
+    print(f"K={K:.3f}: 시드별={[round(l,4) for l in lyaps]}  평균={np.mean(lyaps):.4f}", flush=True)

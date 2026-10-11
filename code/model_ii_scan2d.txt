@@ -1,0 +1,114 @@
+"""다음우선순위 1: lam_N12>0도 포함한 2차원 스캔 -- lam_N6 단독으로는 1.06~1.07대에서
+포화됐는데, N12에도 각도강성을 주면 목표(0.707)를 넘어설 수 있는지 확인."""
+import numpy as np
+from network_base import build_growing_shell, build_multicell_graph, classify_hub_types, build_hub_graph
+
+depth, buf = 2, 10
+all_pts, vor, cluster_idx = build_growing_shell(buffer_radius=buf, depth=depth)
+G, face_seen, vertex_coord = build_multicell_graph(all_pts, vor, cluster_idx)
+hub_pos, hub_N, n_mixed = classify_hub_types(G)
+H = build_hub_graph(G, hub_pos, hub_N)
+nodes = list(H.nodes())
+idx = {n: i for i, n in enumerate(nodes)}
+n_hubs = len(nodes)
+pos = np.array([hub_pos[n] for n in nodes])
+types = np.array([hub_N[n] for n in nodes])
+deg = dict(H.degree())
+edges = np.array([[idx[a], idx[b]] for a, b in H.edges()])
+
+q, p_exp, eps = 4.0, 8.0, 1.0
+def dFdrho(rho): return -eps*0.5/np.sqrt(rho)
+def calibrate_A(ri, rj): return -(2*q/p_exp)*(dFdrho(ri)+dFdrho(rj))
+RHO = {6: 10, 12: 20}
+def r0_of(t1, t2):
+    if t1 == 6 and t2 == 6: return 1.0
+    if t1 == 12 and t2 == 12: return 1.4142136
+    return 0.8660254
+def A_of(t1, t2): return calibrate_A(RHO[t1], RHO[t2])
+r0_edges = np.array([r0_of(types[i], types[j]) for i, j in edges])
+A_edges = np.array([A_of(types[i], types[j]) for i, j in edges])
+def phi(r, r0): return np.exp(-2*q*(r/r0-1))
+def V(r, r0, A): return A*np.exp(-p_exp*(r/r0-1))
+
+deg_arr = np.array([deg[n] for n in nodes])
+dist0 = np.linalg.norm(pos, axis=1)
+core6 = [i for i in range(n_hubs) if types[i]==6 and deg_arr[i]==10]
+core12 = [i for i in range(n_hubs) if types[i]==12 and deg_arr[i]==20]
+core6.sort(key=lambda i: dist0[i]); core12.sort(key=lambda i: dist0[i])
+hub6i, hub12i = core6[0], core12[0]
+axis_31 = np.array([1,1,1.0]); axis_4 = np.array([1.0,0,0])
+target = 1/np.sqrt(2)
+
+def build_tri(lam6, lam12):
+    tri_i, tri_j, tri_k, tri_cos0, tri_lam = [], [], [], [], []
+    for gi in range(n_hubs):
+        lam = lam6 if types[gi] == 6 else lam12
+        if lam == 0: continue
+        nbrs = [idx[m] for m in H.neighbors(nodes[gi])]
+        z = len(nbrs)
+        for a_ in range(z):
+            for b_ in range(a_+1, z):
+                gj, gk = nbrs[a_], nbrs[b_]
+                relj = pos[gj]-pos[gi]; relk = pos[gk]-pos[gi]
+                cos0 = np.dot(relj, relk)/(np.linalg.norm(relj)*np.linalg.norm(relk))
+                tri_i.append(gi); tri_j.append(gj); tri_k.append(gk)
+                tri_cos0.append(cos0); tri_lam.append(lam)
+    return (np.array(tri_i),np.array(tri_j),np.array(tri_k),np.array(tri_cos0),np.array(tri_lam))
+
+def make_energy(tri):
+    tri_i,tri_j,tri_k,tri_cos0,tri_lam = tri
+    def energy(pos_arr):
+        d = pos_arr[edges[:,0]]-pos_arr[edges[:,1]]
+        r = np.linalg.norm(d,axis=1)
+        ph = phi(r,r0_edges)
+        rho = np.zeros(n_hubs)
+        np.add.at(rho, edges[:,0], ph); np.add.at(rho, edges[:,1], ph)
+        rho = np.maximum(rho,1e-8)
+        E = (-eps*np.sqrt(rho)).sum() + V(r,r0_edges,A_edges).sum()
+        if len(tri_i)>0:
+            a = pos_arr[tri_j]-pos_arr[tri_i]; b = pos_arr[tri_k]-pos_arr[tri_i]
+            ra=np.linalg.norm(a,axis=1); rb=np.linalg.norm(b,axis=1)
+            c = np.sum(a*b,axis=1)/(ra*rb)
+            E += 0.5*np.sum(tri_lam*(c-tri_cos0)**2)
+        return E
+    return energy
+
+def rotate_shell_energy(energy_fn, hub_idx, axis, phi_angle):
+    axis = axis/np.linalg.norm(axis)
+    a=np.cos(phi_angle/2); b,c,d = -axis*np.sin(phi_angle/2)
+    R = np.array([
+        [a*a+b*b-c*c-d*d, 2*(b*c+a*d), 2*(b*d-a*c)],
+        [2*(b*c-a*d), a*a+c*c-b*b-d*d, 2*(c*d+a*b)],
+        [2*(b*d+a*c), 2*(c*d-a*b), a*a+d*d-b*b-c*c]])
+    center = pos[hub_idx]
+    nbrs = list(H.neighbors(nodes[hub_idx]))
+    nbr_idx = [idx[m] for m in nbrs]
+    new_pos = pos.copy()
+    for ni in nbr_idx:
+        new_pos[ni] = center + R @ (pos[ni]-center)
+    return energy_fn(new_pos)
+
+def fit_K(energy_fn, E0, hub_idx, axis):
+    small_degs = np.array([0.2,0.5,1.0,2.0])
+    small_rad = np.radians(small_degs)
+    Es = np.array([rotate_shell_energy(energy_fn, hub_idx, axis, r) for r in small_rad])
+    dE = Es - E0
+    coef = np.polyfit(small_rad, dE, 2)
+    return 2*coef[0]
+
+print(f"{'lam6':>6} {'lam12':>6} {'K6':>10} {'K12':>10} {'ratio(degI)':>12}")
+results = []
+for lam6 in [0.0, 0.3, 0.8, 1.5, 3.0]:
+    for lam12 in [0.0, 0.3, 0.8, 1.5, 3.0]:
+        tri = build_tri(lam6, lam12)
+        energy = make_energy(tri)
+        E0 = energy(pos)
+        K6 = fit_K(energy, E0, hub6i, axis_31)
+        K12 = fit_K(energy, E0, hub12i, axis_4)
+        ratio = np.sqrt((K12/20)/(K6/10)) if K6>1e-8 and K12>1e-8 else float('nan')
+        results.append((lam6,lam12,K6,K12,ratio))
+        print(f"{lam6:6.2f} {lam12:6.2f} {K6:10.3f} {K12:10.3f} {ratio:12.4f}")
+
+print(f"\n목표 = {target:.4f}")
+best = min(results, key=lambda r: abs(r[4]-target) if not np.isnan(r[4]) else 999)
+print(f"격자탐색 내 최적: lam6={best[0]}, lam12={best[1]}, ratio={best[4]:.4f}")
